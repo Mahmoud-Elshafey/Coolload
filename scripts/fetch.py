@@ -1,11 +1,15 @@
 import datetime
 import os
+import sys
 import time
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
 # Import the official client from the local fortyguard package
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fortyguard import FortyGuardClient, FortyGuardError
 
 # 1. Initialize Client & Configuration
