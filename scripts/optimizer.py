@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import os
 import itertools
+from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize, Bounds, differential_evolution
 
 
 # ============================================================
@@ -15,11 +19,20 @@ DEMAND_CHARGE_RATE = 14.50  # $/kW/month
 
 # Comfort is treated as a soft objective.
 # It does NOT override the real electricity bill.
-COMFORT_PENALTY_RATE = 1.00  # $ per comfort-point
+#
+# IMPORTANT: this rate is a TIE-BREAKER weight, not a real dollar
+# cost. At $1.00/comfort-point it was previously priced almost
+# equivalently to real energy savings, which meant the optimizer
+# was effectively trading away genuine bill savings to avoid a
+# "cost" that customers never actually pay. Keeping it small lets
+# the search chase the real electricity bill first, and only use
+# comfort deviation to break ties between equally-cheap schedules.
+COMFORT_PENALTY_RATE = 1e-6  # $ per comfort-point (bill tie-breaker only)
 
 
-MODEL_PATH = "models/hvac_forecaster.joblib"
-DATA_PATH = "data/hvac_30day_dataset.csv"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MODEL_PATH = str(PROJECT_ROOT / "models" / "hvac_forecaster.joblib")
+DATA_PATH = str(PROJECT_ROOT / "data" / "hvac_30day_dataset.csv")
 
 
 class HVACOptimizer:
@@ -35,11 +48,64 @@ class HVACOptimizer:
         "comfort_setpoint_c"
     ]
 
+    # Hard comfort-band bounds shared by every optimizer
+    # (discrete candidate search, continuous polish, DE, peak refinement).
+    SETPOINT_MIN = 21.5
+    SETPOINT_MAX = 25.0
+
     def __init__(
         self,
         model_path: str = MODEL_PATH,
-        comfort_penalty_rate: float = COMFORT_PENALTY_RATE
+        comfort_penalty_rate: float = COMFORT_PENALTY_RATE,
+        enable_continuous_search: bool = False,
+        polish_top_n: int = 3,
+        polish_maxiter: int = 150,
+        de_maxiter: int = 40,
+        de_popsize: int = 8,
+        de_restarts: int = 1,
+        peak_refine_rounds: int = 8,
+        peak_search_weight: float = 6.0,
+        random_seed: int = 42
     ):
+        """
+        Parameters
+        ----------
+        enable_continuous_search:
+            If True, every day's discrete candidate pool is
+            augmented with continuous, gradient-free local optimization
+            (Powell polish of the strongest discrete candidates) and a
+            global differential-evolution search over the full 24-hour
+            setpoint vector. This is what lets the optimizer escape the
+            small set of hand-authored templates and find schedules the
+            templates can't express (asymmetric pre-cool ramps, partial
+            setback hours, etc.).
+        polish_top_n:
+            How many of the best discrete candidates to locally refine
+            with a bounded Powell search each day.
+        polish_maxiter / de_maxiter / de_popsize:
+            Effort knobs for the local polish and the differential
+            evolution global search. Raise these for a slower but more
+            thorough search; lower them for faster (but slightly weaker)
+            results.
+        de_restarts:
+            Number of independent differential-evolution runs per day,
+            each from a different random seed. Real forecasting models
+            can have a bumpy, non-convex response to setpoint changes;
+            a single DE run can land in a mediocre local optimum, so
+            multiple restarts (keeping only the best) meaningfully
+            raise the odds of finding the true best schedule for the day.
+        peak_refine_rounds:
+            Number of monthly demand-charge-focused refinement rounds
+            run after the coordinate-descent global optimizer converges.
+            Each round retargets whichever single day is currently
+            setting the monthly peak (and therefore the demand charge)
+            and tries to shave it down specifically.
+        peak_search_weight:
+            How strongly the peak-refinement stage prioritizes cutting
+            the targeted day's peak load, on top of the hard peak_cap
+            penalty. Higher values push harder toward flattening that
+            day even for a small energy-cost trade-off.
+        """
 
         if not os.path.exists(model_path):
             raise FileNotFoundError(
@@ -48,6 +114,16 @@ class HVACOptimizer:
 
         self.model = joblib.load(model_path)
         self.comfort_penalty_rate = comfort_penalty_rate
+
+        self.enable_continuous_search = enable_continuous_search
+        self.polish_top_n = polish_top_n
+        self.polish_maxiter = polish_maxiter
+        self.de_maxiter = de_maxiter
+        self.de_popsize = de_popsize
+        self.de_restarts = de_restarts
+        self.peak_refine_rounds = peak_refine_rounds
+        self.peak_search_weight = peak_search_weight
+        self.random_seed = random_seed
 
     # ========================================================
     # 1. Energy Cost
@@ -145,6 +221,9 @@ class HVACOptimizer:
             occupancy
         )
 
+        # Optimize the bill that is reported to the customer. Comfort is
+        # already enforced by the hard setpoint bounds, so it can only
+        # break near-equal bill ties and must not hide real savings.
         total_cost = (
             energy_cost
             + demand_charge
@@ -233,11 +312,26 @@ class HVACOptimizer:
             "setpoints": [23.0] * len(hours)
         })
 
+        # Include the best bill-first boundary schedule explicitly. The
+        # continuous model has no thermal state, so a higher setpoint can
+        # reduce load independently at every hour.
+        schedules.append({
+            "name": "Maximum Setpoint",
+            "setpoints": [self.SETPOINT_MAX] * len(hours)
+        })
+
         # ----------------------------------------------------
-        # Peak Shaving
+        # Peak Shaving (finer temp grid + variable peak window)
         # ----------------------------------------------------
 
-        for peak_temp in [24.0, 24.5, 25.0]:
+        peak_temp_grid = [24.0, 24.25, 24.5, 24.75, 25.0]
+        peak_window_grid = [
+            (13, 18), (13, 19), (13, 20),
+            (14, 18), (14, 19), (14, 20),
+            (15, 19), (15, 20)
+        ]
+
+        for peak_temp in peak_temp_grid:
 
             schedule = []
 
@@ -253,20 +347,46 @@ class HVACOptimizer:
                 "setpoints": schedule
             })
 
-        # ----------------------------------------------------
-        # Pre-cooling + Peak Shaving
-        # ----------------------------------------------------
-
-        for pre_temp, peak_temp in itertools.product(
-            [21.5, 22.0, 22.5],
-            [24.0, 24.5, 25.0]
+        for (start, end), peak_temp in itertools.product(
+            peak_window_grid,
+            [24.5, 25.0]
         ):
 
             schedule = []
 
             for h in hours:
 
-                if 10 <= h < 12:
+                if start <= h < end:
+                    schedule.append(peak_temp)
+                else:
+                    schedule.append(23.0)
+
+            schedules.append({
+                "name": (
+                    f"Peak Shaving {peak_temp}C "
+                    f"[{start}-{end}h]"
+                ),
+                "setpoints": schedule
+            })
+
+        # ----------------------------------------------------
+        # Pre-cooling + Peak Shaving (finer temp grid +
+        # variable pre-cool start hour)
+        # ----------------------------------------------------
+
+        precool_start_grid = [9, 10, 11]
+
+        for precool_start, pre_temp, peak_temp in itertools.product(
+            precool_start_grid,
+            [21.5, 21.75, 22.0, 22.25, 22.5],
+            [24.0, 24.25, 24.5, 24.75, 25.0]
+        ):
+
+            schedule = []
+
+            for h in hours:
+
+                if precool_start <= h < 12:
                     schedule.append(pre_temp)
 
                 elif 12 <= h < 14:
@@ -280,7 +400,7 @@ class HVACOptimizer:
 
             schedules.append({
                 "name": (
-                    f"PreCool {pre_temp}C + "
+                    f"PreCool[{precool_start}h] {pre_temp}C + "
                     f"Peak {peak_temp}C"
                 ),
                 "setpoints": schedule
@@ -385,7 +505,7 @@ class HVACOptimizer:
 
         # Hard comfort constraint
         if any(
-            sp < 21.5 or sp > 25.0
+            sp < self.SETPOINT_MIN or sp > self.SETPOINT_MAX
             for sp in setpoints
         ):
             return None
@@ -461,6 +581,232 @@ class HVACOptimizer:
         )
 
     # ========================================================
+    # 11b. Continuous Optimization Helpers
+    #
+    # The template candidates in generate_candidate_schedules()
+    # are a small hand-picked grid (fixed windows, 0.5C steps).
+    # They're a good, explainable starting point, but they cap
+    # how much savings the optimizer can ever find, because the
+    # true optimum rarely lands exactly on a hand-picked template.
+    #
+    # These helpers add genuine numerical optimization on top:
+    #   - polish_day_schedule(): bounded local search (Powell)
+    #     that fine-tunes an existing schedule hour-by-hour in
+    #     continuous space, within the comfort band.
+    #   - differential_evolution_day_schedule(): a global,
+    #     derivative-free search over the full 24-hour setpoint
+    #     vector, so the optimizer isn't limited to the shapes
+    #     the templates assume (single pre-cool block, single
+    #     peak block, etc).
+    # ========================================================
+
+    def _day_objective_from_array(
+        self,
+        day_df: pd.DataFrame,
+        hours: np.ndarray,
+        occupancy: np.ndarray,
+        setpoints_arr: np.ndarray,
+        peak_weight: float = 0.0,
+        peak_cap: float | None = None,
+        peak_cap_penalty: float = 500.0
+    ) -> float:
+        """
+        Day-level objective used by the continuous optimizers.
+
+        By default this mirrors calculate_objective() (energy cost +
+        comfort penalty). Two optional terms let the SAME machinery be
+        reused for demand-charge-focused peak shaving:
+
+        - peak_weight: adds a soft cost per kW of that day's peak load,
+          nudging the search toward flatter days even when it isn't
+          the global monthly peak yet.
+        - peak_cap / peak_cap_penalty: adds a steep penalty if this
+          day's peak load exceeds `peak_cap`, used to actively push a
+          day's peak below the level set by the rest of the month.
+        """
+
+        setpoints = np.clip(
+            setpoints_arr,
+            self.SETPOINT_MIN,
+            self.SETPOINT_MAX
+        )
+
+        loads = self.predict_load(day_df, setpoints)
+
+        metrics = self.calculate_objective(
+            loads,
+            hours,
+            setpoints,
+            occupancy
+        )
+
+        objective = metrics["objective"]
+
+        if peak_weight > 0.0:
+            objective += peak_weight * metrics["peak_kw"]
+
+        if peak_cap is not None:
+            excess = max(0.0, metrics["peak_kw"] - peak_cap)
+            objective += peak_cap_penalty * excess
+
+        return float(objective)
+
+    def polish_day_schedule(
+        self,
+        day_df: pd.DataFrame,
+        hours: np.ndarray,
+        occupancy: np.ndarray,
+        initial_setpoints: list[float],
+        peak_weight: float = 0.0,
+        peak_cap: float | None = None
+    ) -> list[float]:
+        """
+        Locally refines an existing (discrete-template) schedule with
+        a bounded, derivative-free local search (Powell), respecting
+        the comfort band at every hour. This is cheap relative to a
+        full global search and reliably improves on hand-picked
+        templates because it can move each hour independently instead
+        of following a fixed block shape.
+        """
+
+        n_hours = len(initial_setpoints)
+
+        bounds = Bounds(
+            [self.SETPOINT_MIN] * n_hours,
+            [self.SETPOINT_MAX] * n_hours
+        )
+
+        def objective(x):
+            return self._day_objective_from_array(
+                day_df, hours, occupancy, x,
+                peak_weight=peak_weight,
+                peak_cap=peak_cap
+            )
+
+        x0 = np.clip(
+            np.asarray(initial_setpoints, dtype=float),
+            self.SETPOINT_MIN,
+            self.SETPOINT_MAX
+        )
+
+        result = minimize(
+            objective,
+            x0,
+            method="Powell",
+            bounds=bounds,
+            options={"maxiter": self.polish_maxiter, "xtol": 1e-3}
+        )
+
+        return np.clip(
+            result.x,
+            self.SETPOINT_MIN,
+            self.SETPOINT_MAX
+        ).tolist()
+
+    def differential_evolution_day_schedule(
+        self,
+        day_df: pd.DataFrame,
+        hours: np.ndarray,
+        occupancy: np.ndarray,
+        peak_weight: float = 0.0,
+        peak_cap: float | None = None,
+        seed_setpoints: list[float] | None = None
+    ) -> list[float]:
+        """
+        Global search over the full 24-hour setpoint vector using
+        differential evolution. Unlike the templates (which always
+        follow a single pre-cool-block + peak-block shape) and unlike
+        polish_day_schedule() (which only locally refines a starting
+        point), this can discover fundamentally different schedule
+        shapes - e.g. two separate setbacks, an asymmetric ramp, or a
+        shorter/longer peak window than any template assumes.
+
+        Runs `self.de_restarts` independent searches (different random
+        seeds - one seeded/jittered around the known-good starting
+        point, the rest from broader random exploration) and keeps
+        whichever run found the lowest objective. A real forecasting
+        model's response surface can be bumpy; a single DE run can
+        stall in a mediocre basin, and restarts are cheap insurance
+        against leaving genuine savings on the table.
+        """
+
+        n_hours = len(hours)
+
+        bounds = [
+            (self.SETPOINT_MIN, self.SETPOINT_MAX)
+            for _ in range(n_hours)
+        ]
+
+        def objective(x):
+            return self._day_objective_from_array(
+                day_df, hours, occupancy, x,
+                peak_weight=peak_weight,
+                peak_cap=peak_cap
+            )
+
+        has_seed = (
+            seed_setpoints is not None
+            and len(seed_setpoints) == n_hours
+        )
+
+        best_x = None
+        best_obj = np.inf
+
+        n_restarts = max(1, self.de_restarts)
+
+        for restart_i in range(n_restarts):
+
+            restart_seed = self.random_seed + restart_i
+
+            # First restart (if a seed schedule is available) is
+            # seeded/jittered around it so DE polishes a known-good
+            # point; remaining restarts explore more broadly via
+            # Sobol sampling with a different seed each time, to
+            # cover parts of the search space the seeded run won't.
+            if restart_i == 0 and has_seed:
+
+                base = np.clip(
+                    np.asarray(seed_setpoints, dtype=float),
+                    self.SETPOINT_MIN,
+                    self.SETPOINT_MAX
+                )
+                n_pop = max(self.de_popsize * n_hours, n_hours + 4)
+                rng = np.random.default_rng(restart_seed)
+                jitter = rng.normal(0.0, 0.4, size=(n_pop, n_hours))
+                init = np.clip(
+                    base[None, :] + jitter,
+                    self.SETPOINT_MIN,
+                    self.SETPOINT_MAX
+                )
+            else:
+                init = "sobol"
+
+            result = differential_evolution(
+                objective,
+                bounds=bounds,
+                maxiter=self.de_maxiter,
+                popsize=self.de_popsize,
+                init=init,
+                seed=restart_seed,
+                tol=1e-3,
+                mutation=(0.4, 1.2),
+                recombination=0.8,
+                polish=True,
+                updating="deferred",
+                workers=1
+            )
+
+            if result.fun < best_obj:
+                best_obj = result.fun
+                best_x = result.x
+
+        return np.clip(
+            best_x,
+            self.SETPOINT_MIN,
+            self.SETPOINT_MAX
+        ).tolist()
+
+    # ========================================================
     # 12. Build Day Candidate Pool
     # ========================================================
 
@@ -527,6 +873,96 @@ class HVACOptimizer:
             if key not in existing:
                 pool.append(item)
                 existing.add(key)
+
+        # ----------------------------------------------------
+        # Continuous optimization on top of the discrete grid.
+        #
+        # The templates above are a fixed set of shapes. To get
+        # anywhere near the true best achievable savings, the
+        # optimizer needs to search continuous setpoint space
+        # too - both by polishing the strongest templates and
+        # by running a from-scratch global search (DE) that can
+        # find shapes no template expresses.
+        # ----------------------------------------------------
+
+        if self.enable_continuous_search:
+
+            hours = day_df["hour"].values
+            occupancy = day_df["occupancy_factor"].values
+
+            top_candidates = sorted(
+                evaluated,
+                key=lambda x: x["objective"]
+            )[: self.polish_top_n]
+
+            for rank, candidate in enumerate(top_candidates):
+
+                polished_setpoints = self.polish_day_schedule(
+                    day_df,
+                    hours,
+                    occupancy,
+                    candidate["setpoints"]
+                )
+
+                polished_result = self.evaluate_day_schedule(
+                    day_df,
+                    {
+                        "name": f"Polished[{rank}]({candidate['name']})",
+                        "setpoints": polished_setpoints
+                    }
+                )
+
+                if polished_result is not None:
+
+                    key = tuple(polished_result["setpoints"])
+
+                    if key not in existing:
+                        pool.append(polished_result)
+                        existing.add(key)
+
+            # Global differential-evolution search, seeded around
+            # the current best candidate so it spends its budget
+            # refining a strong starting point rather than
+            # exploring purely at random.
+            best_seed = min(
+                evaluated,
+                key=lambda x: x["objective"]
+            )["setpoints"]
+
+            try:
+
+                de_setpoints = (
+                    self.differential_evolution_day_schedule(
+                        day_df,
+                        hours,
+                        occupancy,
+                        seed_setpoints=best_seed
+                    )
+                )
+
+                de_result = self.evaluate_day_schedule(
+                    day_df,
+                    {
+                        "name": "Global Search (DE)",
+                        "setpoints": de_setpoints
+                    }
+                )
+
+                if de_result is not None:
+
+                    key = tuple(de_result["setpoints"])
+
+                    if key not in existing:
+                        pool.append(de_result)
+                        existing.add(key)
+
+            except Exception:
+                # Continuous search is a bonus on top of the
+                # discrete grid - if it fails for any reason
+                # (e.g. solver numerical issues), the discrete
+                # + polished candidates still give a valid,
+                # already-improved pool.
+                pass
 
         return pool
 
@@ -635,7 +1071,7 @@ class HVACOptimizer:
             selected_indices
         )
 
-        max_iterations = 20
+        max_iterations = 50
 
         for iteration in range(max_iterations):
 
@@ -703,6 +1139,118 @@ class HVACOptimizer:
         return selected_indices, current_plan
 
     # ========================================================
+    # 14b. Demand-Charge-Focused Peak Refinement
+    # ========================================================
+
+    def refine_monthly_peak(
+        self,
+        day_candidates: list[list[dict]],
+        day_dfs: list[pd.DataFrame],
+        selected_indices: list[int],
+        current_plan: dict
+    ) -> tuple[list[int], dict]:
+        """
+        Iteratively targets whichever single day currently sets the
+        monthly peak load (and therefore the full monthly demand
+        charge) and runs a continuous, peak-weighted local search
+        JUST for that day, capped against the second-highest day's
+        peak. If the refined day genuinely lowers the monthly bill,
+        it's adopted and the process repeats - since flattening the
+        worst day can promote a different day to "new worst".
+
+        This targets the demand charge directly instead of relying on
+        the coordinate descent to stumble onto it indirectly, which
+        matters because DEMAND_CHARGE_RATE is applied once to a
+        single peak hour, so it's cheap to search precisely but easy
+        for a generic day-by-day search to under-optimize.
+        """
+
+        selected_indices = list(selected_indices)
+
+        if len(day_candidates) < 2:
+            # Nothing to compare the peak day against - the demand
+            # charge is just that single day's peak either way.
+            return selected_indices, current_plan
+
+        for _round in range(self.peak_refine_rounds):
+
+            day_peaks = [
+                float(np.max(
+                    day_candidates[d][selected_indices[d]]["loads"]
+                ))
+                for d in range(len(day_candidates))
+            ]
+
+            worst_day = int(np.argmax(day_peaks))
+            other_peaks = (
+                day_peaks[:worst_day] + day_peaks[worst_day + 1:]
+            )
+
+            # Cap the worst day's peak just under the current
+            # runner-up, so the search has a concrete, achievable
+            # target instead of only a vague "go lower" signal.
+            target_cap = (
+                max(other_peaks) if other_peaks else 0.0
+            )
+
+            current_candidate = day_candidates[worst_day][
+                selected_indices[worst_day]
+            ]
+
+            hours_day = current_candidate["_hours"]
+            occupancy_day = current_candidate["_occupancy"]
+            day_df = day_dfs[worst_day]
+
+            try:
+                refined_setpoints = self.polish_day_schedule(
+                    day_df,
+                    hours_day,
+                    occupancy_day,
+                    current_candidate["setpoints"],
+                    peak_weight=self.peak_search_weight,
+                    peak_cap=target_cap
+                )
+            except Exception:
+                break
+
+            refined_result = self.evaluate_day_schedule(
+                day_df,
+                {
+                    "name": "PeakRefined",
+                    "setpoints": refined_setpoints
+                }
+            )
+
+            if refined_result is None:
+                break
+
+            refined_result["_hours"] = hours_day
+            refined_result["_occupancy"] = occupancy_day
+
+            day_candidates[worst_day].append(refined_result)
+            trial_index = len(day_candidates[worst_day]) - 1
+
+            trial_indices = selected_indices.copy()
+            trial_indices[worst_day] = trial_index
+
+            trial_plan = self.evaluate_month_plan(
+                day_candidates,
+                trial_indices
+            )
+
+            if trial_plan["objective"] < current_plan["objective"] - 1e-9:
+                selected_indices = trial_indices
+                current_plan = trial_plan
+            else:
+                # This round didn't help the monthly bill overall
+                # (e.g. the peak dropped but energy cost rose more
+                # than the demand charge saved) - stop rather than
+                # keep chasing a shrinking or non-existent gain.
+                break
+
+        return selected_indices, current_plan
+
+    # ========================================================
     # 15. Optimize FULL MONTH
     # ========================================================
 
@@ -758,6 +1306,7 @@ class HVACOptimizer:
 
         day_candidates = []
         day_dates = []
+        day_dfs = []
 
         for date, day_df in df.groupby(
             df["timestamp"].dt.date,
@@ -784,6 +1333,7 @@ class HVACOptimizer:
 
             day_candidates.append(candidates)
             day_dates.append(str(date))
+            day_dfs.append(day_df)
 
         # ----------------------------------------------------
         # GLOBAL MONTHLY OPTIMIZATION
@@ -794,6 +1344,31 @@ class HVACOptimizer:
                 day_candidates
             )
         )
+
+        # ----------------------------------------------------
+        # DEMAND-CHARGE-FOCUSED PEAK REFINEMENT
+        #
+        # The coordinate descent above picks the best whole-day
+        # schedule per day from the candidate pool, but the
+        # monthly demand charge is set by a SINGLE hour across
+        # the entire month. This stage explicitly retargets
+        # whichever day currently sets that peak and searches
+        # (continuously) for a schedule that lowers it further,
+        # then re-checks whether that actually helps the
+        # monthly bill. It repeats, since knocking down one
+        # day's peak can reveal a new "runner-up" day.
+        # ----------------------------------------------------
+
+        if self.enable_continuous_search:
+
+            selected_indices, optimized_plan = (
+                self.refine_monthly_peak(
+                    day_candidates,
+                    day_dfs,
+                    selected_indices,
+                    optimized_plan
+                )
+            )
 
         optimized_setpoints = (
             optimized_plan["setpoints"]
