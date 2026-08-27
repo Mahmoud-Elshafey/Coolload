@@ -1,64 +1,41 @@
-"""
-يوسّع الداتا الموجودة (data/hvac_30day_dataset.csv) بحيث كل ساعة تتكرر
-بعدة قيم مختلفة لـ comfort_setpoint_c، بدل قيمة 23.0 الثابتة.
+"""Build the dynamic HVAC training dataset.
 
-مهم: الطقس (temperature_c, humidity_pct, ghi_wm2) بتاع كل ساعة زي ما هو -
-مفيش أي اتصال جديد بـ FortyGuard هنا، إحنا بس بنعيد حساب المعادلة الفيزيائية
-لنفس الطقس عند setpoints مختلفة. الهدف: الموديل يتعلم إن تغيير الـ setpoint
-فعلاً بيأثر على الحمل، عشان الـ optimizer يقدر يسأله سؤال حقيقي.
+Run:
+    python scripts/augment_data.py
 
-شغّله بعد ما يكون عندك data/hvac_30day_dataset.csv جاهز، وقبل تدريب الموديل.
+Generates complete hourly control trajectories, including a dense set of
+deterministic pre-cool / peak-shave templates that mirror the exact shapes
+optimizer.py searches over (see thermal_model.make_dynamic_training_rows),
+so the trained model has real, labeled coverage in the region the optimizer
+will actually evaluate - not just flat baselines.
 """
 
 from pathlib import Path
-
 import pandas as pd
+from thermal_model import make_dynamic_training_rows
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
-if not DATA_DIR.exists():
-    DATA_DIR = PROJECT_ROOT / "Coolload" / "data"
 INPUT_PATH = DATA_DIR / "hvac_30day_dataset.csv"
 OUTPUT_PATH = DATA_DIR / "hvac_30day_dataset_augmented.csv"
 
-# القيم اللي هيختار الـ optimizer من بينها فعليًا (زوّد/قلّل حسب احتياجك)
-SETPOINT_OPTIONS = [21.0, 22.0, 23.0, 24.0, 25.0]
 
-
-def recompute_hvac_load(temp_c: float, humidity_pct: float, ghi_wm2: float,
-                         occupancy_factor: float, comfort_setpoint_c: float) -> float:
-    """نفس معادلة fetch.py بالظبط، لكن بـ setpoint متغيّر بدل الثابت."""
-    sensible_load = 1.2 * max(0.0, temp_c - comfort_setpoint_c)
-    latent_load = 0.5 * (humidity_pct / 100.0)
-    solar_load = 0.003 * ghi_wm2
-    occ_load = 0.8 * occupancy_factor
-    return 15.0 + sensible_load + latent_load + solar_load + occ_load
-
-
-def augment_dataset() -> None:
+def augment_dataset():
     df = pd.read_csv(INPUT_PATH)
-    print(f"الداتا الأصلية: {len(df)} صف")
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-    augmented_rows = []
-    for _, row in df.iterrows():
-        for setpoint in SETPOINT_OPTIONS:
-            new_row = row.to_dict()
-            new_row["comfort_setpoint_c"] = setpoint
-            new_row["hvac_load_kw"] = round(
-                recompute_hvac_load(
-                    temp_c=row["temperature_c"],
-                    humidity_pct=row["humidity_pct"],
-                    ghi_wm2=row["ghi_wm2"],
-                    occupancy_factor=row["occupancy_factor"],
-                    comfort_setpoint_c=setpoint,
-                ),
-                2,
-            )
-            augmented_rows.append(new_row)
+    dynamic = make_dynamic_training_rows(
+        df,
+        schedules_per_day=60,
+        seed=42,
+    )
 
-    df_augmented = pd.DataFrame(augmented_rows)
-    df_augmented.to_csv(OUTPUT_PATH, index=False)
-    print(f"الداتا الموسّعة: {len(df_augmented)} صف -> اتحفظت في {OUTPUT_PATH}")
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    dynamic.to_csv(OUTPUT_PATH, index=False)
+
+    print(f"Original weather rows : {len(df)}")
+    print(f"Dynamic training rows : {len(dynamic)}")
+    print(f"Saved                 : {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":

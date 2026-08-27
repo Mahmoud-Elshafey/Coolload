@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
+import time
 import itertools
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import joblib
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize, Bounds, differential_evolution
+from thermal_model import build_thermal_features
 
 
 # ============================================================
@@ -17,17 +20,56 @@ OFF_PEAK_RATE = 0.09        # $/kWh
 ON_PEAK_RATE = 0.26         # $/kWh
 DEMAND_CHARGE_RATE = 14.50  # $/kW/month
 
-# Comfort is treated as a soft objective.
-# It does NOT override the real electricity bill.
+# ============================================================
+# Adaptive Comfort Model (ASHRAE 55 - inspired, with TWO caveats)
+# ============================================================
 #
-# IMPORTANT: this rate is a TIE-BREAKER weight, not a real dollar
-# cost. At $1.00/comfort-point it was previously priced almost
-# equivalently to real energy savings, which meant the optimizer
-# was effectively trading away genuine bill savings to avoid a
-# "cost" that customers never actually pay. Keeping it small lets
-# the search chase the real electricity bill first, and only use
-# comfort deviation to break ties between equally-cheap schedules.
-COMFORT_PENALTY_RATE = 1e-6  # $ per comfort-point (bill tie-breaker only)
+# CAVEAT 1: ASHRAE 55's adaptive comfort method, strictly read, applies
+# to naturally-ventilated spaces where occupants control their own
+# openings - not to centrally air-conditioned commercial buildings
+# like the one this product targets. We deliberately borrow the
+# adaptive comfort MODEL - people acclimate to the recent outdoor
+# climate, so the temperature that feels "neutral" shifts with it -
+# as a well-established, defensible basis for a day-by-day comfort
+# target. This is NOT a claim of formal ASHRAE 55 compliance; say so
+# plainly if asked in a pitch or technical review.
+#
+# CAVEAT 2 (found while building this - important): ASHRAE 55's own
+# coefficients (Tcomfort = 0.31*Trm + 17.8) were fit to TEMPERATE
+# climates. Solving for where that formula alone already reaches a
+# typical 24.5C mechanical-cooling ceiling gives Trm = 21.6C - and a
+# hot-climate commercial building's running-mean outdoor temperature
+# sits above that on nearly every single day of the year. Used
+# literally, the standard's own numbers would say "always run at the
+# ceiling," permanently - which defeats the entire point of an
+# adaptive target and would have silently reproduced the exact
+# "always max setpoint" problem we're trying to fix here.
+#
+# The fix: keep ASHRAE 55's MECHANISM (an exponentially-weighted
+# running mean of recent outdoor temperature, alpha=0.8, exactly as
+# the standard defines it - real day-to-day acclimatization behavior)
+# but replace its fixed temperate-climate slope/intercept with a
+# PERCENTILE-BASED RESCALE onto this building's own achievable
+# comfort band: the coolest ~10th-percentile running-mean days in the
+# dataset map near the comfort floor, the hottest ~90th-percentile
+# days map near the ceiling, and everything in between is
+# interpolated. This is climate-relative by construction, so it
+# produces genuine day-to-day variation whether the building sits in
+# a desert or a mild coastal city, instead of saturating immediately
+# in any hot-climate deployment.
+ADAPTIVE_COMFORT_ALPHA = 0.8          # ASHRAE 55's own running-mean smoothing constant
+ADAPTIVE_COMFORT_PCTL_LOW = 10.0      # Trm percentile mapped to the comfort floor
+ADAPTIVE_COMFORT_PCTL_HIGH = 90.0     # Trm percentile mapped to the comfort ceiling
+
+# Soft comfort penalty (real $, added to the objective):
+# no cost inside a small deadband around the day's adaptive target;
+# quadratic cost beyond it. This is what stops the optimizer from
+# parking at the exact top of the hard comfort band every day
+# regardless of weather - the previous behavior with comfort_penalty
+# hardcoded to a hard hard-wall-only, zero-inside constraint.
+COMFORT_DEADBAND_C = 0.5
+COMFORT_PENALTY_RATE = 0.10   # $ per (deg beyond deadband)^2 per occupied hour
+UNOCCUPIED_COMFORT_WEIGHT = 0.15
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +87,9 @@ class HVACOptimizer:
         "day_of_week",
         "is_weekend",
         "occupancy_factor",
-        "comfort_setpoint_c"
+        "comfort_setpoint_c",
+        "previous_setpoint_c",
+        "indoor_temp_c",
     ]
 
     # Hard comfort-band bounds shared by every optimizer
@@ -53,19 +97,28 @@ class HVACOptimizer:
     SETPOINT_MIN = 21.5
     SETPOINT_MAX = 25.0
 
+    # Hard comfort policy. Occupancy >= 0.50 is considered occupied.
+    OCCUPANCY_THRESHOLD = 0.50
+    OCCUPIED_SETPOINT_MIN = 21.5
+    OCCUPIED_SETPOINT_MAX = 24.5
+    UNOCCUPIED_SETPOINT_MIN = 21.5
+    UNOCCUPIED_SETPOINT_MAX = 25.0
+
     def __init__(
         self,
         model_path: str = MODEL_PATH,
         comfort_penalty_rate: float = COMFORT_PENALTY_RATE,
-        enable_continuous_search: bool = False,
-        polish_top_n: int = 3,
-        polish_maxiter: int = 150,
-        de_maxiter: int = 40,
-        de_popsize: int = 8,
-        de_restarts: int = 1,
-        peak_refine_rounds: int = 8,
+        enable_continuous_search: bool = True,
+        polish_top_n: int = 4,
+        polish_maxiter: int = 200,
+        de_maxiter: int = 60,
+        de_popsize: int = 10,
+        de_restarts: int = 2,
+        peak_refine_rounds: int = 12,
         peak_search_weight: float = 6.0,
-        random_seed: int = 42
+        random_seed: int = 42,
+        parallel_days: bool = True,
+        max_workers: int | None = None
     ):
         """
         Parameters
@@ -78,7 +131,10 @@ class HVACOptimizer:
             setpoint vector. This is what lets the optimizer escape the
             small set of hand-authored templates and find schedules the
             templates can't express (asymmetric pre-cool ramps, partial
-            setback hours, etc.).
+            setback hours, etc.). Defaults to True: the discrete
+            templates alone consistently leave real savings on the
+            table, and this is the single biggest lever for closing the
+            gap to the true achievable optimum.
         polish_top_n:
             How many of the best discrete candidates to locally refine
             with a bounded Powell search each day.
@@ -105,6 +161,18 @@ class HVACOptimizer:
             the targeted day's peak load, on top of the hard peak_cap
             penalty. Higher values push harder toward flattening that
             day even for a small energy-cost trade-off.
+        parallel_days:
+            If True, each calendar day's candidate pool (discrete grid
+            + Powell polish + DE global search) is built concurrently
+            across a thread pool instead of sequentially. Days are
+            fully independent at this stage, so this is "free" wall-
+            clock speedup that lets the heavier de_maxiter/de_popsize/
+            de_restarts settings above run in roughly the same total
+            time as the old, weaker defaults used to take serially.
+        max_workers:
+            Thread pool size for parallel_days. Defaults to
+            min(32, os.cpu_count() + 4), matching
+            ThreadPoolExecutor's own default.
         """
 
         if not os.path.exists(model_path):
@@ -113,6 +181,44 @@ class HVACOptimizer:
             )
 
         self.model = joblib.load(model_path)
+
+        # ------------------------------------------------------------
+        # HARD SCHEMA GUARD.
+        #
+        # A previously-deployed model was silently trained on only 8 of
+        # the 10 FEATURE_COLS (missing previous_setpoint_c and
+        # indoor_temp_c). predict_load() still built those columns
+        # correctly, but the model ignored them - so every hour was
+        # scored independently with zero thermal memory, and pre-cooling
+        # / load-shifting strategies could never show a benefit. That
+        # was silent: no exception, no warning, just quietly worse
+        # savings. This check turns that failure mode into an immediate,
+        # loud error instead of a silent capability loss.
+        # ------------------------------------------------------------
+        get_booster = getattr(self.model, "get_booster", None)
+        if get_booster is not None:
+            booster_features = get_booster().feature_names
+            if (
+                booster_features is not None
+                and list(booster_features) != list(self.FEATURE_COLS)
+            ):
+                missing = set(self.FEATURE_COLS) - set(booster_features)
+                extra = set(booster_features) - set(self.FEATURE_COLS)
+                raise ValueError(
+                    "Loaded model's feature schema does not match "
+                    "HVACOptimizer.FEATURE_COLS - refusing to run with a "
+                    "mismatched model.\n"
+                    f"  Model was trained on : {booster_features}\n"
+                    f"  Optimizer expects    : {self.FEATURE_COLS}\n"
+                    f"  Missing from model   : {sorted(missing) or 'none'}\n"
+                    f"  Extra in model        : {sorted(extra) or 'none'}\n"
+                    "Retrain with train_model.py using the current "
+                    "thermal_model.py, then reload."
+                )
+
+        # Comfort is now a graded, real-dollar soft cost (see the
+        # Adaptive Comfort Model constants above) layered on top of
+        # the hard comfort-band constraint, not a hardcoded no-op.
         self.comfort_penalty_rate = comfort_penalty_rate
 
         self.enable_continuous_search = enable_continuous_search
@@ -124,6 +230,8 @@ class HVACOptimizer:
         self.peak_refine_rounds = peak_refine_rounds
         self.peak_search_weight = peak_search_weight
         self.random_seed = random_seed
+        self.parallel_days = parallel_days
+        self.max_workers = max_workers
 
     # ========================================================
     # 1. Energy Cost
@@ -167,31 +275,175 @@ class HVACOptimizer:
     # 3. Comfort Penalty
     # ========================================================
 
-    def calculate_comfort_penalty(
+    def get_setpoint_bounds(
+        self,
+        occupancy: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return the hard setpoint bounds for each hour."""
+        occupancy = np.asarray(occupancy, dtype=float)
+        occupied = occupancy >= self.OCCUPANCY_THRESHOLD
+
+        lower = np.where(
+            occupied,
+            self.OCCUPIED_SETPOINT_MIN,
+            self.UNOCCUPIED_SETPOINT_MIN
+        )
+        upper = np.where(
+            occupied,
+            self.OCCUPIED_SETPOINT_MAX,
+            self.UNOCCUPIED_SETPOINT_MAX
+        )
+        return lower, upper
+
+    def validate_setpoints(
         self,
         setpoints: list[float],
         occupancy: np.ndarray
+    ) -> bool:
+        """Hard comfort feasibility check; invalid schedules are rejected."""
+        setpoints = np.asarray(setpoints, dtype=float)
+        lower, upper = self.get_setpoint_bounds(occupancy)
+
+        if len(setpoints) != len(lower):
+            return False
+
+        return bool(
+            np.all(setpoints >= lower - 1e-9)
+            and np.all(setpoints <= upper + 1e-9)
+        )
+
+    def compute_adaptive_comfort_targets(
+        self,
+        df: pd.DataFrame
+    ) -> pd.Series:
+        """
+        Compute a per-row adaptive comfort target (deg C), one value
+        per calendar day: an ASHRAE-55-style running mean of outdoor
+        temperature, rescaled onto this building's own comfort band
+        by percentile (see the module-level comment above for why a
+        straight application of ASHRAE 55's own coefficients
+        saturates immediately in a hot climate, and why percentile
+        rescaling is used instead).
+
+        Trm_n = (1 - alpha) * mean_outdoor_temp(day n-1) + alpha * Trm_(n-1)
+
+        The first day in the dataset has no prior history and is
+        seeded with its own daily mean outdoor temperature (a
+        reasonable fallback when no earlier weather history is
+        available).
+
+        The coolest ADAPTIVE_COMFORT_PCTL_LOW-percentile running-mean
+        day in the dataset maps to OCCUPIED_SETPOINT_MIN; the hottest
+        ADAPTIVE_COMFORT_PCTL_HIGH-percentile day maps to
+        OCCUPIED_SETPOINT_MAX; everything else is linearly
+        interpolated between them.
+        """
+        daily_mean = (
+            df.groupby(df["timestamp"].dt.date)["temperature_c"]
+            .mean()
+            .sort_index()
+        )
+
+        dates = list(daily_mean.index)
+        trm_by_date: dict = {}
+
+        if dates:
+            trm = float(daily_mean.iloc[0])
+            trm_by_date[dates[0]] = trm
+
+            for i in range(1, len(dates)):
+                prev_day_mean = float(daily_mean.iloc[i - 1])
+                trm = (
+                    (1 - ADAPTIVE_COMFORT_ALPHA) * prev_day_mean
+                    + ADAPTIVE_COMFORT_ALPHA * trm
+                )
+                trm_by_date[dates[i]] = trm
+
+        trm_values = np.array(list(trm_by_date.values()), dtype=float)
+
+        if len(trm_values) == 0:
+            trm_low, trm_high = 20.0, 30.0
+        else:
+            trm_low = float(
+                np.percentile(trm_values, ADAPTIVE_COMFORT_PCTL_LOW)
+            )
+            trm_high = float(
+                np.percentile(trm_values, ADAPTIVE_COMFORT_PCTL_HIGH)
+            )
+            if trm_high - trm_low < 1e-6:
+                # A dataset with almost no day-to-day temperature
+                # variation (e.g. a very short or unusually uniform
+                # window) - fall back to a fixed +/-3C spread around
+                # the single observed value so the mapping stays
+                # well-defined instead of dividing by ~0.
+                trm_high = trm_low + 3.0
+
+        band_width = (
+            self.OCCUPIED_SETPOINT_MAX - self.OCCUPIED_SETPOINT_MIN
+        )
+
+        def _target_for_date(d):
+            trm = trm_by_date.get(d, trm_low)
+            frac = (trm - trm_low) / (trm_high - trm_low)
+            frac = float(np.clip(frac, 0.0, 1.0))
+            return self.OCCUPIED_SETPOINT_MIN + frac * band_width
+
+        return df["timestamp"].dt.date.map(_target_for_date)
+
+    def calculate_comfort_penalty(
+        self,
+        setpoints: list[float],
+        occupancy: np.ndarray,
+        comfort_target_c: np.ndarray | float | None = None
     ) -> float:
         """
-        Soft comfort objective.
+        Hard-band violation (always checked) PLUS a graded soft
+        penalty against that day's adaptive comfort target (only
+        when comfort_target_c is supplied).
 
-        23C is used as the neutral comfort reference.
-        Deviation matters more when occupancy is higher.
+        Hard violation: schedules outside the occupied/unoccupied
+        band are rejected upstream by validate_setpoints(), so this
+        term is a safety net and is ~0 for every candidate that
+        actually reaches this function in practice.
 
-        This is NOT a medical/thermal comfort model; it is an
-        optimization preference used to prevent unnecessarily
-        aggressive setpoints.
+        Soft penalty (real $, this is what changed): even INSIDE the
+        hard band, sitting more than COMFORT_DEADBAND_C away from the
+        day's adaptive comfort target now costs something, growing
+        quadratically with distance. Unoccupied hours are weighted
+        down (occupant comfort barely matters when no one is there)
+        rather than dropped entirely, since a building shouldn't
+        swing to a wild extreme even when empty.
         """
-
         setpoints = np.asarray(setpoints, dtype=float)
         occupancy = np.asarray(occupancy, dtype=float)
+        lower, upper = self.get_setpoint_bounds(occupancy)
 
-        deviation = np.abs(setpoints - 23.0)
+        low_violation = np.maximum(lower - setpoints, 0.0)
+        high_violation = np.maximum(setpoints - upper, 0.0)
+        hard_violation = float(np.sum(low_violation + high_violation))
 
-        # Occupied hours matter more than unoccupied hours.
-        weights = 0.25 + 0.75 * np.clip(occupancy, 0.0, 1.0)
+        if comfort_target_c is None:
+            return hard_violation
 
-        return float(np.sum(deviation * weights))
+        target = np.broadcast_to(
+            np.asarray(comfort_target_c, dtype=float),
+            setpoints.shape
+        )
+
+        deviation = np.abs(setpoints - target)
+        excess = np.maximum(deviation - COMFORT_DEADBAND_C, 0.0)
+
+        occupied = occupancy >= self.OCCUPANCY_THRESHOLD
+        weight = np.where(occupied, 1.0, UNOCCUPIED_COMFORT_WEIGHT)
+
+        soft_penalty = float(
+            np.sum(weight * self.comfort_penalty_rate * (excess ** 2))
+        )
+
+        # Hard violations should never occur here in practice (they're
+        # rejected upstream), but if they somehow do, they must swamp
+        # the soft term rather than being masked by it.
+        return hard_violation * 1000.0 + soft_penalty
 
     # ========================================================
     # 4. Monthly Objective
@@ -202,7 +454,8 @@ class HVACOptimizer:
         loads_kw: np.ndarray,
         hours: np.ndarray,
         setpoints: list[float],
-        occupancy: np.ndarray
+        occupancy: np.ndarray,
+        comfort_target_c: np.ndarray | float | None = None
     ) -> dict:
 
         energy_cost = self.calculate_energy_cost(
@@ -218,17 +471,15 @@ class HVACOptimizer:
 
         comfort_penalty = self.calculate_comfort_penalty(
             setpoints,
-            occupancy
+            occupancy,
+            comfort_target_c
         )
 
-        # Optimize the bill that is reported to the customer. Comfort is
-        # already enforced by the hard setpoint bounds, so it can only
-        # break near-equal bill ties and must not hide real savings.
-        total_cost = (
-            energy_cost
-            + demand_charge
-            + comfort_penalty * self.comfort_penalty_rate
-        )
+        # Comfort is now a graded real-dollar cost layered on top of
+        # the (still hard) comfort-band constraint, so the search
+        # genuinely trades it off against energy/demand savings
+        # instead of always maxing out the setpoint for free.
+        total_cost = energy_cost + demand_charge + comfort_penalty
 
         return {
             "energy_cost": energy_cost,
@@ -277,17 +528,41 @@ class HVACOptimizer:
         df: pd.DataFrame,
         setpoints: list[float]
     ) -> np.ndarray:
+        """Predict HVAC load sequentially so setpoints have thermal memory.
 
+        The old implementation sent each hour independently to the model.
+        This version first reconstructs the building thermal state for each
+        calendar day. Therefore a lower setpoint at 10:00 can cool the
+        indoor state used at 11:00, 12:00, ... and can genuinely support
+        pre-cooling/load-shifting strategies.
+        """
         features = df.copy()
+        features["timestamp"] = pd.to_datetime(features["timestamp"])
+        features = features.sort_values("timestamp").reset_index(drop=True)
 
-        features["comfort_setpoint_c"] = setpoints
+        setpoints_arr = np.asarray(setpoints, dtype=float)
+        if len(features) != len(setpoints_arr):
+            raise ValueError("setpoints length must equal df length")
 
-        return np.asarray(
-            self.model.predict(
-                features[self.FEATURE_COLS]
-            ),
-            dtype=float
-        )
+        predictions = np.empty(len(features), dtype=float)
+
+        # Thermal state resets at the beginning of each building day.
+        for _, idx in features.groupby(
+            features["timestamp"].dt.date, sort=True
+        ).groups.items():
+            idx = np.asarray(list(idx), dtype=int)
+            day = features.iloc[idx].copy()
+            day_sp = setpoints_arr[idx]
+
+            day_features = build_thermal_features(day, day_sp)
+            day_features["comfort_setpoint_c"] = day_sp
+
+            predictions[idx] = np.asarray(
+                self.model.predict(day_features[self.FEATURE_COLS]),
+                dtype=float
+            )
+
+        return predictions
 
     # ========================================================
     # 7. Generate Candidate Schedule for ONE DAY
@@ -312,12 +587,19 @@ class HVACOptimizer:
             "setpoints": [23.0] * len(hours)
         })
 
-        # Include the best bill-first boundary schedule explicitly. The
-        # continuous model has no thermal state, so a higher setpoint can
-        # reduce load independently at every hour.
+        # Maximum setpoint remains a useful benchmark, but it is no longer
+        # automatically dominant: predict_load() carries indoor thermal
+        # state forward, so earlier pre-cooling can change later loads.
+        max_setpoints = [
+            self.OCCUPIED_SETPOINT_MAX
+            if occ >= self.OCCUPANCY_THRESHOLD
+            else self.UNOCCUPIED_SETPOINT_MAX
+            for occ in occupancy
+        ]
+
         schedules.append({
-            "name": "Maximum Setpoint",
-            "setpoints": [self.SETPOINT_MAX] * len(hours)
+            "name": "Maximum Comfortable Setpoint",
+            "setpoints": max_setpoints
         })
 
         # ----------------------------------------------------
@@ -502,12 +784,11 @@ class HVACOptimizer:
     ) -> dict:
 
         setpoints = schedule["setpoints"]
+        occupancy = day_df["occupancy_factor"].values
 
-        # Hard comfort constraint
-        if any(
-            sp < self.SETPOINT_MIN or sp > self.SETPOINT_MAX
-            for sp in setpoints
-        ):
+        # HARD comfort constraint: reject any schedule outside the
+        # occupied/unoccupied comfort band.
+        if not self.validate_setpoints(setpoints, occupancy):
             return None
 
         loads = self.predict_load(
@@ -516,19 +797,26 @@ class HVACOptimizer:
         )
 
         hours = day_df["hour"].values
-        occupancy = day_df["occupancy_factor"].values
+
+        comfort_target_c = (
+            day_df["adaptive_comfort_target_c"].values
+            if "adaptive_comfort_target_c" in day_df.columns
+            else None
+        )
 
         metrics = self.calculate_objective(
             loads,
             hours,
             setpoints,
-            occupancy
+            occupancy,
+            comfort_target_c
         )
 
         return {
             "name": schedule["name"],
             "setpoints": setpoints,
             "loads": loads,
+            "_comfort_target": comfort_target_c,
             **metrics
         }
 
@@ -625,19 +913,23 @@ class HVACOptimizer:
           day's peak below the level set by the rest of the month.
         """
 
-        setpoints = np.clip(
-            setpoints_arr,
-            self.SETPOINT_MIN,
-            self.SETPOINT_MAX
-        )
+        lower, upper = self.get_setpoint_bounds(occupancy)
+        setpoints = np.clip(setpoints_arr, lower, upper)
 
         loads = self.predict_load(day_df, setpoints)
+
+        comfort_target_c = (
+            day_df["adaptive_comfort_target_c"].values
+            if "adaptive_comfort_target_c" in day_df.columns
+            else None
+        )
 
         metrics = self.calculate_objective(
             loads,
             hours,
             setpoints,
-            occupancy
+            occupancy,
+            comfort_target_c
         )
 
         objective = metrics["objective"]
@@ -671,10 +963,8 @@ class HVACOptimizer:
 
         n_hours = len(initial_setpoints)
 
-        bounds = Bounds(
-            [self.SETPOINT_MIN] * n_hours,
-            [self.SETPOINT_MAX] * n_hours
-        )
+        lower, upper = self.get_setpoint_bounds(occupancy)
+        bounds = Bounds(lower, upper)
 
         def objective(x):
             return self._day_objective_from_array(
@@ -685,8 +975,8 @@ class HVACOptimizer:
 
         x0 = np.clip(
             np.asarray(initial_setpoints, dtype=float),
-            self.SETPOINT_MIN,
-            self.SETPOINT_MAX
+            lower,
+            upper
         )
 
         result = minimize(
@@ -732,10 +1022,8 @@ class HVACOptimizer:
 
         n_hours = len(hours)
 
-        bounds = [
-            (self.SETPOINT_MIN, self.SETPOINT_MAX)
-            for _ in range(n_hours)
-        ]
+        lower, upper = self.get_setpoint_bounds(occupancy)
+        bounds = list(zip(lower.tolist(), upper.tolist()))
 
         def objective(x):
             return self._day_objective_from_array(
@@ -767,16 +1055,16 @@ class HVACOptimizer:
 
                 base = np.clip(
                     np.asarray(seed_setpoints, dtype=float),
-                    self.SETPOINT_MIN,
-                    self.SETPOINT_MAX
+                    lower,
+                    upper
                 )
                 n_pop = max(self.de_popsize * n_hours, n_hours + 4)
                 rng = np.random.default_rng(restart_seed)
                 jitter = rng.normal(0.0, 0.4, size=(n_pop, n_hours))
                 init = np.clip(
                     base[None, :] + jitter,
-                    self.SETPOINT_MIN,
-                    self.SETPOINT_MAX
+                    lower,
+                    upper
                 )
             else:
                 init = "sobol"
@@ -800,11 +1088,7 @@ class HVACOptimizer:
                 best_obj = result.fun
                 best_x = result.x
 
-        return np.clip(
-            best_x,
-            self.SETPOINT_MIN,
-            self.SETPOINT_MAX
-        ).tolist()
+        return np.clip(best_x, lower, upper).tolist()
 
     # ========================================================
     # 12. Build Day Candidate Pool
@@ -980,6 +1264,7 @@ class HVACOptimizer:
         all_hours = []
         all_setpoints = []
         all_occupancy = []
+        all_comfort_targets = []
 
         for day_index, candidate_index in enumerate(
             selected_indices
@@ -1007,17 +1292,20 @@ class HVACOptimizer:
 
             all_hours.extend(candidate["_hours"])
             all_occupancy.extend(candidate["_occupancy"])
+            all_comfort_targets.extend(candidate["_comfort_target"])
 
         loads = np.asarray(all_loads, dtype=float)
         hours = np.asarray(all_hours)
         setpoints = list(all_setpoints)
         occupancy = np.asarray(all_occupancy, dtype=float)
+        comfort_targets = np.asarray(all_comfort_targets, dtype=float)
 
         metrics = self.calculate_objective(
             loads,
             hours,
             setpoints,
-            occupancy
+            occupancy,
+            comfort_targets
         )
 
         return {
@@ -1259,6 +1547,9 @@ class HVACOptimizer:
         df: pd.DataFrame
     ) -> dict:
 
+        timing = {}
+        t_total_start = time.perf_counter()
+
         if df.empty:
             raise ValueError("Dataset is empty.")
 
@@ -1272,9 +1563,19 @@ class HVACOptimizer:
             "timestamp"
         ).reset_index(drop=True)
 
+        # Attach the per-row ASHRAE-55-inspired adaptive comfort
+        # target BEFORE any day-slicing, so every downstream day_df
+        # (discrete candidates, Powell polish, DE, peak refinement)
+        # automatically carries it as a column.
+        df["adaptive_comfort_target_c"] = (
+            self.compute_adaptive_comfort_targets(df)
+        )
+
         # ----------------------------------------------------
         # BASELINE
         # ----------------------------------------------------
+
+        t0 = time.perf_counter()
 
         baseline_setpoints = [
             23.0
@@ -1296,53 +1597,104 @@ class HVACOptimizer:
         baseline_comfort_penalty = (
             self.calculate_comfort_penalty(
                 baseline_setpoints,
-                occupancy
+                occupancy,
+                df["adaptive_comfort_target_c"].values
             )
+        )
+
+        timing["baseline_eval_sec"] = round(
+            time.perf_counter() - t0, 3
         )
 
         # ----------------------------------------------------
         # Generate candidate pool for every day
+        #
+        # Each day's pool (discrete templates + Powell polish +
+        # DE global search) is independent of every other day, so
+        # when parallel_days is enabled this runs across a thread
+        # pool instead of one day at a time. That parallelism is
+        # what makes it affordable to run the heavier de_maxiter /
+        # de_popsize / de_restarts settings needed to reliably
+        # clear a 10%+ monthly savings target.
         # ----------------------------------------------------
 
-        day_candidates = []
-        day_dates = []
-        day_dfs = []
+        t0 = time.perf_counter()
 
-        for date, day_df in df.groupby(
-            df["timestamp"].dt.date,
-            sort=True
-        ):
+        day_groups = list(
+            df.groupby(df["timestamp"].dt.date, sort=True)
+        )
 
+        def _build_one_day(date, day_df):
+            print(f"building day {date}...", flush=True)
             day_df = day_df.copy()
+            candidates = self.build_day_candidate_pool(day_df)
 
-            candidates = self.build_day_candidate_pool(
-                day_df
-            )
-
-            # Attach hours/occupancy metadata so the global
-            # optimizer can evaluate the whole month.
             for candidate in candidates:
-
                 candidate["_hours"] = (
                     day_df["hour"].values.copy()
                 )
-
                 candidate["_occupancy"] = (
                     day_df["occupancy_factor"].values.copy()
                 )
 
+            return str(date), day_df, candidates
+
+        results_by_date = {}
+
+        if self.parallel_days and len(day_groups) > 1:
+
+            with ThreadPoolExecutor(
+                max_workers=self.max_workers
+            ) as pool:
+
+                futures = {
+                    pool.submit(_build_one_day, date, day_df): date
+                    for date, day_df in day_groups
+                }
+
+                for future in as_completed(futures):
+                    date_str, day_df, candidates = future.result()
+                    results_by_date[date_str] = (day_df, candidates)
+
+        else:
+
+            for date, day_df in day_groups:
+                date_str, day_df, candidates = _build_one_day(
+                    date, day_df
+                )
+                results_by_date[date_str] = (day_df, candidates)
+
+        # Recover chronological order regardless of thread
+        # completion order.
+        day_candidates = []
+        day_dates = []
+        day_dfs = []
+
+        for date, _ in day_groups:
+            date_str = str(date)
+            day_df, candidates = results_by_date[date_str]
             day_candidates.append(candidates)
-            day_dates.append(str(date))
+            day_dates.append(date_str)
             day_dfs.append(day_df)
+
+        timing["day_candidate_pools_sec"] = round(
+            time.perf_counter() - t0, 3
+        )
 
         # ----------------------------------------------------
         # GLOBAL MONTHLY OPTIMIZATION
         # ----------------------------------------------------
 
+        t0 = time.perf_counter()
+
         selected_indices, optimized_plan = (
             self.global_monthly_optimizer(
                 day_candidates
             )
+        )
+
+        timing["global_coordinate_descent_sec"] = round(
+            time.perf_counter() - t0, 3
         )
 
         # ----------------------------------------------------
@@ -1359,6 +1711,8 @@ class HVACOptimizer:
         # day's peak can reveal a new "runner-up" day.
         # ----------------------------------------------------
 
+        t0 = time.perf_counter()
+
         if self.enable_continuous_search:
 
             selected_indices, optimized_plan = (
@@ -1369,6 +1723,10 @@ class HVACOptimizer:
                     optimized_plan
                 )
             )
+
+        timing["peak_refinement_sec"] = round(
+            time.perf_counter() - t0, 3
+        )
 
         optimized_setpoints = (
             optimized_plan["setpoints"]
@@ -1403,6 +1761,10 @@ class HVACOptimizer:
         peak_reduction = (
             baseline_cost["peak_kw"]
             - optimized_cost["peak_kw"]
+        )
+
+        timing["total_sec"] = round(
+            time.perf_counter() - t_total_start, 3
         )
 
         # ----------------------------------------------------
@@ -1563,7 +1925,10 @@ class HVACOptimizer:
                     round(
                         optimized_plan["objective"],
                         2
-                    )
+                    ),
+
+                "timing_sec":
+                    timing
             },
 
             "daily_strategies":
@@ -1666,6 +2031,33 @@ if __name__ == "__main__":
         f"{summary['global_objective']:.2f}"
     )
 
+    print("=" * 65)
+
+    timing = summary["timing_sec"]
+
+    print("\nRuntime Breakdown:")
+    print(
+        f"  Baseline evaluation        : "
+        f"{timing['baseline_eval_sec']:.2f}s"
+    )
+    print(
+        f"  Day candidate pools        : "
+        f"{timing['day_candidate_pools_sec']:.2f}s"
+        f"  (discrete grid + Powell polish + DE, "
+        f"{'parallel across days' if optimizer.parallel_days else 'sequential'})"
+    )
+    print(
+        f"  Global coordinate descent  : "
+        f"{timing['global_coordinate_descent_sec']:.2f}s"
+    )
+    print(
+        f"  Peak/demand-charge refine  : "
+        f"{timing['peak_refinement_sec']:.2f}s"
+    )
+    print(
+        f"  TOTAL                      : "
+        f"{timing['total_sec']:.2f}s"
+    )
     print("=" * 65)
 
     print("\nDaily Strategies:")
