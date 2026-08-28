@@ -151,10 +151,14 @@ class RagAgent:
         self.retriever = RagRetriever()
         self.top_k = top_k
 
-    def ask(self, question: str) -> str:
+    def ask_with_sources(self, question: str) -> dict:
+        """Same as ask(), but also returns which document IDs were
+        retrieved. Added for the FastAPI /api/chat endpoint, whose
+        dashboard shows a "Retrieved Context" accordion with real
+        source document IDs (e.g. "monthly_summary", "2024-07-15").
+        ask() above is unchanged and behaves exactly as before.
+        """
         retrieved = self.retriever.retrieve(question, top_k=self.top_k)
-        print(f"\n[Debug] Context documents retrieved: {[doc.doc_id for doc in retrieved]}")
-        
         context = _build_context_block(retrieved)
 
         user_message = (
@@ -171,7 +175,9 @@ class RagAgent:
             ],
         )
 
-        return response.choices[0].message.content or ""
+        answer = response.choices[0].message.content or ""
+        sources = [doc.doc_id for doc in retrieved]
+        return {"answer": answer, "sources": sources}
 
 
 def main() -> None:
