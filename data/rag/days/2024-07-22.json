@@ -1,0 +1,11 @@
+{
+  "type": "daily_plan",
+  "date": "2024-07-22",
+  "strategy": "Polished[1](Peak Shaving 24.5C [13-20h])",
+  "daily_energy_cost_usd": 27.47,
+  "daily_peak_kw": 12.6,
+  "comfort_penalty": 0.19,
+  "energy_optimizer_choice": "Maximum Comfortable Setpoint",
+  "peak_optimizer_choice": "Global Search (DE)",
+  "comfort_optimizer_choice": "Baseline"
+}

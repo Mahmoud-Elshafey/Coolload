@@ -1,0 +1,11 @@
+{
+  "type": "daily_plan",
+  "date": "2024-07-23",
+  "strategy": "Polished[1](Occupancy Aware)",
+  "daily_energy_cost_usd": 31.13,
+  "daily_peak_kw": 13.18,
+  "comfort_penalty": 0.72,
+  "energy_optimizer_choice": "Maximum Comfortable Setpoint",
+  "peak_optimizer_choice": "Global Search (DE)",
+  "comfort_optimizer_choice": "Baseline"
+}

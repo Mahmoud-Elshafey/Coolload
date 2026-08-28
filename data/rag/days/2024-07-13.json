@@ -1,0 +1,11 @@
+{
+  "type": "daily_plan",
+  "date": "2024-07-13",
+  "strategy": "Maximum Comfortable Setpoint",
+  "daily_energy_cost_usd": 25.13,
+  "daily_peak_kw": 10.12,
+  "comfort_penalty": 0.0,
+  "energy_optimizer_choice": "Maximum Comfortable Setpoint",
+  "peak_optimizer_choice": "Maximum Comfortable Setpoint",
+  "comfort_optimizer_choice": "Maximum Comfortable Setpoint"
+}

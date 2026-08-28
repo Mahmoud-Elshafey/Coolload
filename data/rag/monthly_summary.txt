@@ -1,0 +1,12 @@
+Monthly HVAC Optimization Summary
+
+Baseline total cost:   $1,107.05
+Optimized total cost:  $1,033.21
+Total savings:         $73.84 (6.67% reduction)
+
+Baseline monthly peak demand:  14.71 kW
+Optimized monthly peak demand: 13.74 kW
+Peak reduction:                0.97 kW
+
+Baseline comfort penalty:  10.69
+Optimized comfort penalty: 18.16

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 import itertools
@@ -1940,6 +1941,159 @@ class HVACOptimizer:
 
 
 # ============================================================
+# RAG Document Export
+# ============================================================
+#
+# This section is a straight merge of export_rag_data.py into this
+# file, at the caller's request, so the whole pipeline (optimize ->
+# export RAG docs) lives in one file and runs as one process. No
+# logic was changed: build_day_document(), build_monthly_summary_
+# document(), and export_rag_documents() below are byte-for-byte the
+# same functions that used to live in export_rag_data.py, just with
+# their `from optimizer import HVACOptimizer, DATA_PATH` line dropped
+# (unnecessary now that they're defined in the same module as
+# HVACOptimizer itself). Nothing about HVACOptimizer, its parameters,
+# or optimize_month()'s return value was touched, so output is
+# identical to running optimizer.py before this section existed.
+#
+# export_rag_documents() takes the `results` dict optimize_month()
+# already returns and writes it to data/rag/ -- one .txt + .json per
+# day, plus one monthly summary .txt + .json. It is called once, at
+# the end of the __main__ block below, using the SAME `results` this
+# script already computed -- not a second, separately-configured
+# optimizer run. That guarantees the RAG documents an agent would
+# read always match whatever this script just printed to the console.
+
+RAG_DIR = PROJECT_ROOT / "data" / "rag"
+DAYS_DIR = RAG_DIR / "days"
+SUMMARY_PATH = RAG_DIR / "monthly_summary"
+
+
+def _format_currency(value: float) -> str:
+    """Consistent $ formatting so every document reads the same way."""
+    return f"${value:,.2f}"
+
+
+def build_day_document(
+    date: str,
+    daily_row: dict,
+    hourly_df: pd.DataFrame,
+) -> tuple[str, dict]:
+    """Build a (text, metadata) pair describing one optimized day.
+
+    The text is written in plain, natural language on purpose: it is
+    the chunk that gets embedded and retrieved, so it should read like
+    a briefing a manager would want summarized back to them, not like
+    raw JSON.
+    """
+    day_hours = hourly_df[hourly_df["timestamp"].str.startswith(date)]
+
+    if day_hours.empty:
+        raise ValueError(f"No hourly rows found for date {date}")
+
+    peak_row = day_hours.loc[day_hours["optimized_load_kw"].idxmax()]
+
+    lines = [
+        f"Date: {date}",
+        f"Strategy used: {daily_row['strategy']}",
+        f"Estimated energy cost for this day: "
+        f"{_format_currency(daily_row['daily_energy_cost_usd'])}",
+        f"Peak load this day: {daily_row['daily_peak_kw']:.2f} kW "
+        f"at hour {int(peak_row['hour']):02d}:00",
+        f"Comfort penalty (0 = fully within comfort bounds): "
+        f"{daily_row['comfort_penalty']:.2f}",
+        "",
+        "Hour-by-hour plan "
+        "(baseline setpoint -> optimized setpoint, predicted load):",
+    ]
+
+    for _, row in day_hours.iterrows():
+        lines.append(
+            f"  {int(row['hour']):02d}:00 | "
+            f"outdoor {row['temperature_c']:.1f}C | "
+            f"occupancy {row['occupancy_factor']:.2f} | "
+            f"baseline setpoint {row['baseline_setpoint_c']:.1f}C -> "
+            f"optimized setpoint {row['optimized_setpoint_c']:.1f}C | "
+            f"baseline load {row['baseline_load_kw']:.2f}kW -> "
+            f"optimized load {row['optimized_load_kw']:.2f}kW"
+        )
+
+    text = "\n".join(lines)
+
+    metadata: dict = {
+        "type": "daily_plan",
+        "date": date,
+        "strategy": daily_row["strategy"],
+        "daily_energy_cost_usd": daily_row["daily_energy_cost_usd"],
+        "daily_peak_kw": daily_row["daily_peak_kw"],
+        "comfort_penalty": daily_row["comfort_penalty"],
+        "energy_optimizer_choice": daily_row.get("energy_optimizer_choice"),
+        "peak_optimizer_choice": daily_row.get("peak_optimizer_choice"),
+        "comfort_optimizer_choice": daily_row.get("comfort_optimizer_choice"),
+    }
+    return text, metadata
+
+
+def build_monthly_summary_document(
+    summary: dict,
+) -> tuple[str, dict]:
+    """Build the single top-level document covering the whole month."""
+    lines = [
+        "Monthly HVAC Optimization Summary",
+        "",
+        f"Baseline total cost:   {_format_currency(summary['baseline_total_cost_usd'])}",
+        f"Optimized total cost:  {_format_currency(summary['optimized_total_cost_usd'])}",
+        f"Total savings:         {_format_currency(summary['savings_usd'])} "
+        f"({summary['savings_pct']:.2f}% reduction)",
+        "",
+        f"Baseline monthly peak demand:  {summary['baseline_peak_kw']:.2f} kW",
+        f"Optimized monthly peak demand: {summary['optimized_peak_kw']:.2f} kW",
+        f"Peak reduction:                {summary['peak_reduction_kw']:.2f} kW",
+        "",
+        f"Baseline comfort penalty:  {summary['baseline_comfort_penalty']:.2f}",
+        f"Optimized comfort penalty: {summary['optimized_comfort_penalty']:.2f}",
+    ]
+    text = "\n".join(lines)
+    metadata = {"type": "monthly_summary", **summary}
+    return text, metadata
+
+
+def export_rag_documents(results: dict) -> None:
+    """Write per-day and monthly-summary documents to data/rag/.
+
+    Parameters
+    ----------
+    results:
+        The dict returned by HVACOptimizer.optimize_month(). Must
+        contain "summary", "daily_strategies" (DataFrame), and
+        "hourly_schedule" (DataFrame) -- exactly what optimize_month()
+        already returns, unchanged.
+    """
+    DAYS_DIR.mkdir(parents=True, exist_ok=True)
+
+    daily_df = results["daily_strategies"]
+    hourly_df = results["hourly_schedule"].copy()
+    hourly_df["timestamp"] = hourly_df["timestamp"].astype(str)
+
+    for _, daily_row in daily_df.iterrows():
+        date = daily_row["date"]
+        text, metadata = build_day_document(date, daily_row.to_dict(), hourly_df)
+
+        (DAYS_DIR / f"{date}.txt").write_text(text, encoding="utf-8")
+        (DAYS_DIR / f"{date}.json").write_text(
+            json.dumps(metadata, indent=2), encoding="utf-8"
+        )
+
+    summary_text, summary_metadata = build_monthly_summary_document(results["summary"])
+    SUMMARY_PATH.with_suffix(".txt").write_text(summary_text, encoding="utf-8")
+    SUMMARY_PATH.with_suffix(".json").write_text(
+        json.dumps(summary_metadata, indent=2), encoding="utf-8"
+    )
+
+    print(f"Saved {len(daily_df)} daily documents + 1 monthly summary to {RAG_DIR}")
+
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -2067,3 +2221,12 @@ if __name__ == "__main__":
             index=False
         )
     )
+
+    # ------------------------------------------------------------
+    # Export RAG documents from THIS run's results -- reuses the
+    # `results` dict already computed above, so the RAG documents
+    # always match exactly what was just printed to the console.
+    # ------------------------------------------------------------
+    export_rag_documents(results)
+
+    print(f"\n[OK] RAG documents exported (see export_rag_documents output above).")

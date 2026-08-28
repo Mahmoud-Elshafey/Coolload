@@ -1,0 +1,11 @@
+{
+  "type": "daily_plan",
+  "date": "2024-07-03",
+  "strategy": "Baseline",
+  "daily_energy_cost_usd": 32.12,
+  "daily_peak_kw": 13.63,
+  "comfort_penalty": 1.21,
+  "energy_optimizer_choice": "Maximum Comfortable Setpoint",
+  "peak_optimizer_choice": "Global Search (DE)",
+  "comfort_optimizer_choice": "Baseline"
+}

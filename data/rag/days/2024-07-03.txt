@@ -1,0 +1,31 @@
+Date: 2024-07-03
+Strategy used: Baseline
+Estimated energy cost for this day: $32.12
+Peak load this day: 13.63 kW at hour 15:00
+Comfort penalty (0 = fully within comfort bounds): 1.21
+
+Hour-by-hour plan (baseline setpoint -> optimized setpoint, predicted load):
+  00:00 | outdoor 37.8C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 7.35kW -> optimized load 7.35kW
+  01:00 | outdoor 37.0C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 6.94kW -> optimized load 6.94kW
+  02:00 | outdoor 35.8C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 6.31kW -> optimized load 6.31kW
+  03:00 | outdoor 36.0C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 6.47kW -> optimized load 6.47kW
+  04:00 | outdoor 35.9C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 6.49kW -> optimized load 6.49kW
+  05:00 | outdoor 34.7C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 5.83kW -> optimized load 5.83kW
+  06:00 | outdoor 36.1C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 6.65kW -> optimized load 6.65kW
+  07:00 | outdoor 36.3C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 6.78kW -> optimized load 6.78kW
+  08:00 | outdoor 36.9C | occupancy 0.90 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 9.62kW -> optimized load 9.62kW
+  09:00 | outdoor 38.3C | occupancy 0.90 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 11.00kW -> optimized load 11.00kW
+  10:00 | outdoor 39.1C | occupancy 0.90 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 11.67kW -> optimized load 11.67kW
+  11:00 | outdoor 39.4C | occupancy 0.90 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 12.06kW -> optimized load 12.06kW
+  12:00 | outdoor 40.2C | occupancy 0.90 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 12.95kW -> optimized load 12.95kW
+  13:00 | outdoor 40.9C | occupancy 0.90 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 13.36kW -> optimized load 13.36kW
+  14:00 | outdoor 41.1C | occupancy 0.90 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 13.49kW -> optimized load 13.49kW
+  15:00 | outdoor 41.5C | occupancy 0.90 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 13.63kW -> optimized load 13.63kW
+  16:00 | outdoor 41.6C | occupancy 0.90 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 13.38kW -> optimized load 13.38kW
+  17:00 | outdoor 41.6C | occupancy 0.90 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 13.35kW -> optimized load 13.35kW
+  18:00 | outdoor 41.6C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 10.94kW -> optimized load 10.94kW
+  19:00 | outdoor 40.9C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 10.35kW -> optimized load 10.35kW
+  20:00 | outdoor 40.0C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 9.63kW -> optimized load 9.63kW
+  21:00 | outdoor 39.1C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 8.89kW -> optimized load 8.89kW
+  22:00 | outdoor 39.4C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 9.05kW -> optimized load 9.05kW
+  23:00 | outdoor 38.3C | occupancy 0.15 | baseline setpoint 23.0C -> optimized setpoint 23.0C | baseline load 8.34kW -> optimized load 8.34kW

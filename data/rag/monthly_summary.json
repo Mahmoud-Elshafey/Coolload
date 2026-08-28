@@ -1,0 +1,24 @@
+{
+  "type": "monthly_summary",
+  "baseline_energy_cost_usd": 893.8,
+  "optimized_energy_cost_usd": 833.94,
+  "baseline_demand_charge_usd": 213.25,
+  "optimized_demand_charge_usd": 199.27,
+  "baseline_total_cost_usd": 1107.05,
+  "optimized_total_cost_usd": 1033.21,
+  "savings_usd": 73.84,
+  "savings_pct": 6.67,
+  "baseline_peak_kw": 14.71,
+  "optimized_peak_kw": 13.74,
+  "peak_reduction_kw": 0.97,
+  "baseline_comfort_penalty": 10.69,
+  "optimized_comfort_penalty": 18.16,
+  "global_objective": 1051.36,
+  "timing_sec": {
+    "baseline_eval_sec": 0.154,
+    "day_candidate_pools_sec": 4094.181,
+    "global_coordinate_descent_sec": 41.414,
+    "peak_refinement_sec": 2.328,
+    "total_sec": 4138.132
+  }
+}
