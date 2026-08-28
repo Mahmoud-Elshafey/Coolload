@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CoolLoad AI — Optimization Console</title>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.1/dist/apexcharts.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          base: '#0B0F17',
+          panel: '#1E293B',
+          border: '#334155',
+          txprimary: '#F8FAFC',
+          txsecondary: '#94A3B8',
+          teal: '#14B8A6',
+          amber: '#F59E0B',
+          slate: '#64748B',
+        },
+        fontFamily: {
+          sans: ['Inter', 'sans-serif'],
+          mono: ['"JetBrains Mono"', 'monospace'],
+        },
+      },
+    },
+  };
+</script>
+
+<style>
+  * { scrollbar-width: thin; scrollbar-color: #334155 transparent; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  html { color-scheme: dark; }
+
+  :focus-visible {
+    outline: 2px solid #14B8A6;
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+  }
+
+  details > summary { list-style: none; cursor: pointer; }
+  details > summary::-webkit-details-marker { display: none; }
+
+  .chip {
+    transition: border-color 120ms ease, color 120ms ease;
+  }
+  .chip:hover { border-color: #14B8A6; color: #F8FAFC; }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
+    background: #14B8A6;
+  }
+
+  .bubble-user {
+    background: #263449;
+    border: 1px solid #334155;
+  }
+  .bubble-ai {
+    background: #161E2E;
+    border: 1px solid #334155;
+  }
+
+  .apexcharts-tooltip {
+    font-family: 'JetBrains Mono', monospace !important;
+  }
+</style>
+</head>
+
+<body class="bg-base text-txprimary font-sans antialiased min-h-screen">
+
+  <!-- ============ TOP BAR ============ -->
+  <header class="border-b border-border px-6 py-4 flex items-center justify-between">
+    <div class="flex items-baseline gap-3">
+      <h1 class="text-lg font-semibold tracking-tight">CoolLoad AI</h1>
+      <span class="text-sm text-txsecondary">HVAC Optimization Console</span>
+    </div>
+    <div class="text-xs font-mono text-txsecondary" id="dateRangeLabel">Jul 1 – Jul 30, 2024</div>
+  </header>
+
+  <!-- ============ MAIN GRID ============ -->
+  <main class="p-6 grid grid-cols-1 lg:grid-cols-[65%_35%] gap-4 items-start">
+
+    <!-- ================= LEFT COLUMN ================= -->
+    <section class="flex flex-col gap-4">
+
+      <!-- KPI ROW -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div class="bg-panel border border-border rounded-md px-4 py-3">
+          <div class="text-xs text-txsecondary mb-1.5">Monthly Savings</div>
+          <div class="text-2xl font-mono font-semibold text-teal" id="kpiSavings">—</div>
+          <div class="text-xs text-txsecondary mt-1 font-mono" id="kpiSavingsPct">—</div>
+        </div>
+        <div class="bg-panel border border-border rounded-md px-4 py-3">
+          <div class="text-xs text-txsecondary mb-1.5">Peak kW Reduction</div>
+          <div class="text-2xl font-mono font-semibold text-teal" id="kpiPeakReduction">—</div>
+          <div class="text-xs text-txsecondary mt-1 font-mono" id="kpiPeakDetail">—</div>
+        </div>
+        <div class="bg-panel border border-border rounded-md px-4 py-3">
+          <div class="text-xs text-txsecondary mb-1.5">Baseline Cost</div>
+          <div class="text-2xl font-mono font-semibold text-slate" id="kpiBaseline">—</div>
+          <div class="text-xs text-txsecondary mt-1">30-day total</div>
+        </div>
+        <div class="bg-panel border border-border rounded-md px-4 py-3">
+          <div class="text-xs text-txsecondary mb-1.5">Optimized Cost</div>
+          <div class="text-2xl font-mono font-semibold text-txprimary" id="kpiOptimized">—</div>
+          <div class="text-xs text-txsecondary mt-1">30-day total</div>
+        </div>
+      </div>
+
+      <!-- MAIN CHART 1: Daily Peak Load -->
+      <div class="bg-panel border border-border rounded-md p-4">
+        <div class="flex items-center justify-between mb-2">
+          <h2 class="text-sm font-medium">Daily Peak Load</h2>
+          <div class="flex items-center gap-4 text-xs text-txsecondary font-mono">
+            <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-sm bg-slate"></span>Baseline</span>
+            <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-sm bg-teal"></span>Optimized</span>
+          </div>
+        </div>
+        <div id="dailyPeakChart"></div>
+      </div>
+
+      <!-- DATE CONTROL BAR -->
+      <div class="bg-panel border border-border rounded-md px-4 py-3 flex items-center gap-3">
+        <label for="dateSelect" class="text-xs text-txsecondary">Viewing date</label>
+        <select id="dateSelect"
+          class="bg-base border border-border rounded px-2.5 py-1.5 text-sm font-mono text-txprimary focus:outline-none focus:border-teal">
+        </select>
+      </div>
+
+      <!-- SPLIT CHARTS ROW -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="bg-panel border border-border rounded-md p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-medium">Hourly Dispatch</h2>
+            <div class="flex items-center gap-3 text-xs text-txsecondary font-mono">
+              <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-sm bg-slate"></span>Baseline</span>
+              <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-sm bg-teal"></span>Optimized</span>
+            </div>
+          </div>
+          <div id="hourlyDispatchChart"></div>
+        </div>
+
+        <div class="bg-panel border border-border rounded-md p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-medium">Setpoint vs Indoor Temp</h2>
+            <div class="flex items-center gap-3 text-xs text-txsecondary font-mono">
+              <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-sm bg-amber"></span>Setpoint</span>
+              <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-sm bg-teal"></span>Indoor</span>
+            </div>
+          </div>
+          <div id="setpointIndoorChart"></div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ================= RIGHT COLUMN ================= -->
+    <section class="bg-panel border border-border rounded-md flex flex-col h-[calc(100vh-8.5rem)] lg:sticky lg:top-6">
+
+      <!-- HEADER -->
+      <div class="border-b border-border px-4 py-3 flex items-center justify-between">
+        <h2 class="text-sm font-medium">AI Assistant</h2>
+        <div class="flex items-center gap-1.5 text-xs font-mono text-txsecondary">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="statusLabel">Model: Groq GPT-120B | Status: Connected</span>
+        </div>
+      </div>
+
+      <!-- MESSAGE HISTORY -->
+      <div id="chatMessages" class="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-3">
+        <div class="flex justify-start">
+          <div class="bubble-ai rounded-md px-3.5 py-2.5 max-w-[85%] text-sm leading-relaxed">
+            Ask me about the optimized HVAC plan — daily costs, peak demand, or savings for any day in July.
+          </div>
+        </div>
+      </div>
+
+      <!-- QUICK PROMPT CHIPS -->
+      <div class="px-4 pt-2 pb-1 flex flex-wrap gap-2 border-t border-border">
+        <button class="chip text-xs font-mono text-txsecondary border border-border rounded-full px-3 py-1.5"
+          data-prompt="What is the July 1 plan?">What is July 1 plan?</button>
+        <button class="chip text-xs font-mono text-txsecondary border border-border rounded-full px-3 py-1.5"
+          data-prompt="What are the monthly totals?">Monthly totals</button>
+        <button class="chip text-xs font-mono text-txsecondary border border-border rounded-full px-3 py-1.5"
+          data-prompt="Which day had the highest peak demand?">Highest peak day</button>
+      </div>
+
+      <!-- INPUT BAR -->
+      <div class="px-4 pb-4 pt-2">
+        <div class="flex items-center gap-2 bg-base border border-border rounded-md px-2 py-1.5 focus-within:border-teal">
+          <input id="chatInput" type="text" placeholder="Ask about the HVAC plan..."
+            class="flex-1 bg-transparent text-sm px-1.5 py-1 focus:outline-none placeholder:text-txsecondary" />
+          <button id="chatSendBtn"
+            class="text-xs font-medium bg-teal text-base rounded px-3 py-1.5 hover:opacity-90 transition-opacity">
+            Send
+          </button>
+        </div>
+      </div>
+
+    </section>
+
+  </main>
+
+<script>
+// ============================================================
+// CONFIG
+// ============================================================
+const API_BASE = ''; // relative -- works when served by FastAPI at the same origin
+const DEFAULT_DATE = '2024-07-01';
+
+// ============================================================
+// MOCK DATA (fallback when the FastAPI server isn't reachable,
+// e.g. opening this file directly via file://). Every loadX()
+// function below tries a real fetch() to the matching endpoint
+// first; if that fails, it falls back to these generators so the
+// dashboard still renders something coherent standalone.
+// ============================================================
+
+function mockDates() {
+  const dates = [];
+  for (let d = 1; d <= 30; d++) dates.push(`2024-07-${String(d).padStart(2, '0')}`);
+  return dates;
+}
+
+function mockSummary() {
+  return {
+    baseline_total_cost_usd: 1107.05,
+    optimized_total_cost_usd: 1033.21,
+    savings_usd: 73.84,
+    savings_pct: 6.67,
+    baseline_peak_kw: 14.71,
+    optimized_peak_kw: 13.74,
+    peak_reduction_kw: 0.97,
+  };
+}
+
+function mockDailyPeak() {
+  return mockDates().map((date, i) => {
+    const baseline = 12 + 3 * Math.sin(i / 4) + Math.random() * 1.5;
+    const optimized = baseline - (0.5 + Math.random() * 1.2);
+    return {
+      date,
+      baseline_peak_kw: +baseline.toFixed(2),
+      optimized_peak_kw: +optimized.toFixed(2),
+    };
+  });
+}
+
+function mockHourly(dateStr) {
+  const hours = [];
+  for (let h = 0; h < 24; h++) {
+    const outdoor = 26 + 12 * Math.max(0, Math.sin(((h - 6) / 15) * Math.PI));
+    const occupied = h >= 8 && h <= 17;
+    const occupancy = occupied ? 0.85 : 0.15;
+
+    const baselineSetpoint = 23.0;
+    let optimizedSetpoint = 23.0;
+    if (h >= 9 && h < 12) optimizedSetpoint = 21.75;
+    else if (h >= 12 && h < 14) optimizedSetpoint = 22.5;
+    else if (h >= 14 && h < 19) optimizedSetpoint = 24.5;
+
+    const baselineLoad = Math.max(0, 3 + (outdoor - 23) * 0.55 + occupancy * 1.1);
+    const optimizedLoad = Math.max(0, baselineLoad - (23 - optimizedSetpoint > 0 ? -0.4 : 1.1));
+
+    const baselineIndoor = baselineSetpoint + (outdoor - baselineSetpoint) * 0.08;
+    const optimizedIndoor = optimizedSetpoint + (outdoor - optimizedSetpoint) * 0.08;
+
+    hours.push({
+      hour: h,
+      temperature_c: +outdoor.toFixed(2),
+      occupancy_factor: +occupancy.toFixed(2),
+      baseline_setpoint_c: baselineSetpoint,
+      optimized_setpoint_c: optimizedSetpoint,
+      baseline_load_kw: +baselineLoad.toFixed(2),
+      optimized_load_kw: +optimizedLoad.toFixed(2),
+      baseline_indoor_temp_c: +baselineIndoor.toFixed(2),
+      optimized_indoor_temp_c: +optimizedIndoor.toFixed(2),
+    });
+  }
+  return hours;
+}
+
+function mockChatReply(queryStr) {
+  return {
+    answer: `(Offline demo mode — server not reachable) Here's a placeholder answer for: "${queryStr}". Connect to the FastAPI backend to get real optimizer-grounded answers.`,
+    sources: ['monthly_summary', DEFAULT_DATE],
+  };
+}
+
+// ============================================================
+// API FUNCTIONS -- try fetch() first, fall back to mock data.
+// These map 1:1 to FastAPI's /api/summary, /api/daily-peak,
+// /api/hourly/{date}, and /api/chat.
+// ============================================================
+
+async function loadSummaryMetrics() {
+  try {
+    const res = await fetch(`${API_BASE}/api/summary`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.warn('[loadSummaryMetrics] falling back to mock data:', err.message);
+    return mockSummary();
+  }
+}
+
+async function loadDailyPeakChart() {
+  try {
+    const res = await fetch(`${API_BASE}/api/daily-peak`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.warn('[loadDailyPeakChart] falling back to mock data:', err.message);
+    return mockDailyPeak();
+  }
+}
+
+async function loadHourlyDispatch(dateStr) {
+  try {
+    const res = await fetch(`${API_BASE}/api/hourly/${dateStr}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.warn('[loadHourlyDispatch] falling back to mock data:', err.message);
+    return mockHourly(dateStr);
+  }
+}
+
+async function sendChatMessage(queryStr) {
+  try {
+    const res = await fetch(`${API_BASE}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: queryStr }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.warn('[sendChatMessage] falling back to mock data:', err.message);
+    return mockChatReply(queryStr);
+  }
+}
+
+// ============================================================
+// RENDERING
+// ============================================================
+
+const money = (v) => `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+async function renderSummary() {
+  const s = await loadSummaryMetrics();
+  document.getElementById('kpiSavings').textContent = money(s.savings_usd);
+  document.getElementById('kpiSavingsPct').textContent = `${s.savings_pct}% reduction`;
+  document.getElementById('kpiPeakReduction').textContent = `${s.peak_reduction_kw} kW`;
+  document.getElementById('kpiPeakDetail').textContent = `${s.baseline_peak_kw} → ${s.optimized_peak_kw} kW`;
+  document.getElementById('kpiBaseline').textContent = money(s.baseline_total_cost_usd);
+  document.getElementById('kpiOptimized').textContent = money(s.optimized_total_cost_usd);
+}
+
+const CHART_BASE = {
+  chart: {
+    background: 'transparent',
+    toolbar: { show: false },
+    fontFamily: 'JetBrains Mono, monospace',
+  },
+  theme: { mode: 'dark' },
+  grid: {
+    borderColor: '#334155',
+    strokeDashArray: 3,
+    xaxis: { lines: { show: false } },
+  },
+  tooltip: { theme: 'dark' },
+  legend: { show: false },
+};
+
+let dailyPeakChart, hourlyDispatchChart, setpointIndoorChart;
+
+async function renderDailyPeakChart() {
+  const rows = await loadDailyPeakChart();
+  const dates = rows.map((r) => r.date);
+
+  // Populate the date selector from the same call.
+  const select = document.getElementById('dateSelect');
+  select.innerHTML = '';
+  dates.forEach((d) => {
+    const opt = document.createElement('option');
+    opt.value = d;
+    opt.textContent = d;
+    if (d === DEFAULT_DATE) opt.selected = true;
+    select.appendChild(opt);
+  });
+
+  const options = {
+    ...CHART_BASE,
+    chart: { ...CHART_BASE.chart, type: 'bar', height: 220 },
+    series: [
+      { name: 'Baseline', data: rows.map((r) => r.baseline_peak_kw) },
+      { name: 'Optimized', data: rows.map((r) => r.optimized_peak_kw) },
+    ],
+    colors: ['#64748B', '#14B8A6'],
+    plotOptions: {
+      bar: { columnWidth: '70%', borderRadius: 2 },
+    },
+    dataLabels: { enabled: false },
+    xaxis: {
+      categories: dates.map((d) => d.slice(5)), // MM-DD
+      labels: { style: { colors: '#94A3B8', fontSize: '10px' }, rotate: 0 },
+      axisBorder: { color: '#334155' },
+      axisTicks: { show: false },
+      tickAmount: 10,
+    },
+    yaxis: {
+      labels: { style: { colors: '#94A3B8', fontSize: '11px' }, formatter: (v) => `${v.toFixed(0)}` },
+      title: { text: 'kW', style: { color: '#94A3B8', fontSize: '10px', fontWeight: 400 } },
+    },
+  };
+
+  dailyPeakChart = new ApexCharts(document.querySelector('#dailyPeakChart'), options);
+  dailyPeakChart.render();
+}
+
+async function renderHourlyCharts(dateStr) {
+  const hours = await loadHourlyDispatch(dateStr);
+  const categories = hours.map((h) => `${String(h.hour).padStart(2, '0')}:00`);
+
+  // ---- Chart 2A: Hourly Dispatch (dual-area) ----
+  const dispatchSeries = [
+    { name: 'Baseline Load', data: hours.map((h) => h.baseline_load_kw) },
+    { name: 'Optimized Load', data: hours.map((h) => h.optimized_load_kw) },
+  ];
+
+  if (!hourlyDispatchChart) {
+    const options = {
+      ...CHART_BASE,
+      chart: { ...CHART_BASE.chart, type: 'area', height: 220 },
+      series: dispatchSeries,
+      colors: ['#64748B', '#14B8A6'],
+      stroke: { curve: 'smooth', width: 2 },
+      fill: {
+        type: 'gradient',
+        gradient: { opacityFrom: 0.25, opacityTo: 0.02, stops: [0, 100] },
+      },
+      dataLabels: { enabled: false },
+      xaxis: {
+        categories,
+        labels: { style: { colors: '#94A3B8', fontSize: '10px' }, rotate: 0 },
+        axisBorder: { color: '#334155' },
+        axisTicks: { show: false },
+        tickAmount: 6,
+      },
+      yaxis: {
+        labels: { style: { colors: '#94A3B8', fontSize: '11px' } },
+        title: { text: 'kW', style: { color: '#94A3B8', fontSize: '10px', fontWeight: 400 } },
+      },
+    };
+    hourlyDispatchChart = new ApexCharts(document.querySelector('#hourlyDispatchChart'), options);
+    hourlyDispatchChart.render();
+  } else {
+    hourlyDispatchChart.updateOptions({ xaxis: { categories } });
+    hourlyDispatchChart.updateSeries(dispatchSeries);
+  }
+
+  // ---- Chart 2B: Setpoint vs Indoor Temp (step vs smooth) ----
+  const climateSeries = [
+    { name: 'Setpoint', data: hours.map((h) => h.optimized_setpoint_c) },
+    { name: 'Indoor Temp', data: hours.map((h) => h.optimized_indoor_temp_c) },
+  ];
+
+  if (!setpointIndoorChart) {
+    const options = {
+      ...CHART_BASE,
+      chart: { ...CHART_BASE.chart, type: 'line', height: 220 },
+      series: climateSeries,
+      colors: ['#F59E0B', '#14B8A6'],
+      stroke: {
+        curve: ['stepline', 'smooth'],
+        width: [2, 2],
+      },
+      dataLabels: { enabled: false },
+      xaxis: {
+        categories,
+        labels: { style: { colors: '#94A3B8', fontSize: '10px' }, rotate: 0 },
+        axisBorder: { color: '#334155' },
+        axisTicks: { show: false },
+        tickAmount: 6,
+      },
+      yaxis: {
+        labels: { style: { colors: '#94A3B8', fontSize: '11px' }, formatter: (v) => `${v.toFixed(1)}°C` },
+      },
+    };
+    setpointIndoorChart = new ApexCharts(document.querySelector('#setpointIndoorChart'), options);
+    setpointIndoorChart.render();
+  } else {
+    setpointIndoorChart.updateOptions({ xaxis: { categories } });
+    setpointIndoorChart.updateSeries(climateSeries);
+  }
+}
+
+// ============================================================
+// CHAT
+// ============================================================
+
+function appendUserBubble(text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'flex justify-end';
+  wrap.innerHTML = `
+    <div class="bubble-user rounded-md px-3.5 py-2.5 max-w-[85%] text-sm leading-relaxed">${escapeHtml(text)}</div>
+  `;
+  document.getElementById('chatMessages').appendChild(wrap);
+}
+
+function appendAiBubble(answer, sources) {
+  const wrap = document.createElement('div');
+  wrap.className = 'flex justify-start flex-col items-start gap-1.5 max-w-[90%]';
+
+  const sourceItems = sources.map((s) => `<li class="font-mono text-txsecondary">${escapeHtml(s)}</li>`).join('');
+
+  wrap.innerHTML = `
+    <div class="bubble-ai rounded-md px-3.5 py-2.5 text-sm leading-relaxed">${escapeHtml(answer)}</div>
+    <details class="text-xs">
+      <summary class="text-txsecondary border border-border rounded-full px-2.5 py-1 inline-block hover:border-teal hover:text-txprimary transition-colors">
+        Retrieved Context (${sources.length} docs)
+      </summary>
+      <ul class="mt-1.5 ml-1 space-y-0.5 text-xs">${sourceItems}</ul>
+    </details>
+  `;
+  document.getElementById('chatMessages').appendChild(wrap);
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function scrollChatToBottom() {
+  const el = document.getElementById('chatMessages');
+  el.scrollTop = el.scrollHeight;
+}
+
+async function handleSend(queryStr) {
+  const trimmed = queryStr.trim();
+  if (!trimmed) return;
+
+  appendUserBubble(trimmed);
+  document.getElementById('chatInput').value = '';
+  scrollChatToBottom();
+
+  const sendBtn = document.getElementById('chatSendBtn');
+  sendBtn.disabled = true;
+  sendBtn.textContent = '...';
+
+  const result = await sendChatMessage(trimmed);
+
+  appendAiBubble(result.answer, result.sources || []);
+  scrollChatToBottom();
+
+  sendBtn.disabled = false;
+  sendBtn.textContent = 'Send';
+}
+
+// ============================================================
+// WIRE UP
+// ============================================================
+
+document.addEventListener('DOMContentLoaded', () => {
+  renderSummary();
+  renderDailyPeakChart().then(() => renderHourlyCharts(DEFAULT_DATE));
+
+  document.getElementById('dateSelect').addEventListener('change', (e) => {
+    renderHourlyCharts(e.target.value);
+  });
+
+  document.getElementById('chatSendBtn').addEventListener('click', () => {
+    handleSend(document.getElementById('chatInput').value);
+  });
+
+  document.getElementById('chatInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleSend(e.target.value);
+  });
+
+  document.querySelectorAll('.chip').forEach((chip) => {
+    chip.addEventListener('click', () => handleSend(chip.dataset.prompt));
+  });
+});
+</script>
+
+</body>
+</html>

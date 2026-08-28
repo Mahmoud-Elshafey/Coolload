@@ -1,0 +1,31 @@
+date,strategy,daily_energy_cost_usd,daily_peak_kw,comfort_penalty,energy_optimizer_choice,peak_optimizer_choice,comfort_optimizer_choice
+2024-07-01,Baseline,27.51,12.93,1.21,Maximum Comfortable Setpoint,Peak Shaving 24.5C [14-20h],Baseline
+2024-07-02,Baseline,32.13,13.88,1.21,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-03,Baseline,32.12,13.63,1.21,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-04,Baseline,31.42,13.48,0.99,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-05,Peak Shaving 24.5C [13-20h],32.05,13.82,1.96,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-06,Maximum Comfortable Setpoint,25.49,10.28,0.95,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-07,Maximum Comfortable Setpoint,25.15,10.16,0.43,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-08,Maximum Comfortable Setpoint,30.6,13.72,0.19,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Occupancy Aware
+2024-07-09,Maximum Comfortable Setpoint,30.43,13.66,0.03,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint
+2024-07-10,Maximum Comfortable Setpoint,29.0,13.35,0.0,Maximum Comfortable Setpoint,Peak Shaving 24.5C [13-20h],Maximum Comfortable Setpoint
+2024-07-11,Maximum Comfortable Setpoint,30.47,13.58,0.02,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint
+2024-07-12,Maximum Comfortable Setpoint,29.72,13.33,0.0,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint
+2024-07-13,Maximum Comfortable Setpoint,25.13,10.12,0.0,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint
+2024-07-14,Maximum Comfortable Setpoint,21.99,9.19,0.0,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint
+2024-07-15,Maximum Comfortable Setpoint,25.12,11.51,0.04,Maximum Comfortable Setpoint,Peak Shaving 24.5C [13-20h],Maximum Comfortable Setpoint
+2024-07-16,Occupancy Aware,28.74,12.62,0.26,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-17,Occupancy Aware,28.74,12.75,0.24,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-18,Occupancy Aware,30.05,13.38,0.24,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-19,Maximum Comfortable Setpoint,29.28,12.92,0.81,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-20,Maximum Comfortable Setpoint,25.74,10.25,0.24,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Peak Shaving 24.0C
+2024-07-21,Maximum Comfortable Setpoint,20.09,9.95,0.03,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Occupancy Aware
+2024-07-22,Occupancy Aware,27.54,12.92,0.18,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-23,Occupancy Aware,31.17,13.35,0.72,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-24,Maximum Comfortable Setpoint,29.78,13.28,1.0,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-25,Maximum Comfortable Setpoint,27.58,12.89,0.35,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Peak Shaving 24.0C
+2024-07-26,Maximum Comfortable Setpoint,25.4,11.98,0.99,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-27,Occupancy Aware,23.93,9.78,1.08,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-28,Occupancy Aware,23.17,9.88,0.88,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-29,Occupancy Aware,27.33,12.72,1.5,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
+2024-07-30,Baseline,28.32,12.94,0.7,Maximum Comfortable Setpoint,Maximum Comfortable Setpoint,Baseline
