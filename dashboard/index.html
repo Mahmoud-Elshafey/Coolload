@@ -7,6 +7,7 @@
 
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.1/dist/apexcharts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
@@ -74,22 +75,35 @@
     border: 1px solid #334155;
   }
 
+  /* Markdown Formatting Fixes */
+  .bubble-ai p { margin-bottom: 0.5rem; }
+  .bubble-ai p:last-child { margin-bottom: 0; }
+  .bubble-ai ul { list-style-type: disc; margin-left: 1.25rem; margin-bottom: 0.5rem; }
+  .bubble-ai ol { list-style-type: decimal; margin-left: 1.25rem; margin-bottom: 0.5rem; }
+  .bubble-ai li { margin-bottom: 0.25rem; }
+  .bubble-ai strong { font-weight: 600; color: #F8FAFC; }
+
   .apexcharts-tooltip {
     font-family: 'JetBrains Mono', monospace !important;
   }
 </style>
 </head>
+<title>CoolLoad AI — Bank of America Optimization Console</title>
 
 <body class="bg-base text-txprimary font-sans antialiased min-h-screen">
 
-  <!-- ============ TOP BAR ============ -->
-  <header class="border-b border-border px-6 py-4 flex items-center justify-between">
-    <div class="flex items-baseline gap-3">
-      <h1 class="text-lg font-semibold tracking-tight">CoolLoad AI</h1>
-      <span class="text-sm text-txsecondary">HVAC Optimization Console</span>
-    </div>
-    <div class="text-xs font-mono text-txsecondary" id="dateRangeLabel">Jul 1 – Jul 30, 2024</div>
-  </header>
+<!-- ============ TOP BAR ============ -->
+<header class="border-b border-border px-6 py-4 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <h1 class="text-lg font-semibold tracking-tight">CoolLoad AI</h1>
+    <span class="text-sm text-txsecondary">HVAC Optimization Console</span>
+    <!-- شارة اسم المبنى -->
+    <span class="text-xs font-mono bg-panel border border-teal/40 text-teal px-2.5 py-1 rounded">
+      Bank of America Facility
+    </span>
+  </div>
+  <div class="text-xs font-mono text-txsecondary" id="dateRangeLabel">Jul 1 – Jul 30, 2024</div>
+</header>
 
   <!-- ============ MAIN GRID ============ -->
   <main class="p-6 grid grid-cols-1 lg:grid-cols-[65%_35%] gap-4 items-start">
@@ -222,12 +236,16 @@
 const API_BASE = ''; // relative -- works when served by FastAPI at the same origin
 const DEFAULT_DATE = '2024-07-01';
 
+// Configure Marked.js options
+if (typeof marked !== 'undefined') {
+  marked.setOptions({
+    gfm: true,
+    breaks: true,
+  });
+}
+
 // ============================================================
-// MOCK DATA (fallback when the FastAPI server isn't reachable,
-// e.g. opening this file directly via file://). Every loadX()
-// function below tries a real fetch() to the matching endpoint
-// first; if that fails, it falls back to these generators so the
-// dashboard still renders something coherent standalone.
+// MOCK DATA (fallback when the FastAPI server isn't reachable)
 // ============================================================
 
 function mockDates() {
@@ -296,15 +314,13 @@ function mockHourly(dateStr) {
 
 function mockChatReply(queryStr) {
   return {
-    answer: `(Offline demo mode — server not reachable) Here's a placeholder answer for: "${queryStr}". Connect to the FastAPI backend to get real optimizer-grounded answers.`,
+    answer: `**Offline Demo Mode**\n\nHere is a placeholder answer for: "${queryStr}". Connect to the FastAPI backend to get real optimizer-grounded answers.\n\n* **Estimated Savings:** $73.84\n* **Status:** Offline Fallback Active`,
     sources: ['monthly_summary', DEFAULT_DATE],
   };
 }
 
 // ============================================================
-// API FUNCTIONS -- try fetch() first, fall back to mock data.
-// These map 1:1 to FastAPI's /api/summary, /api/daily-peak,
-// /api/hourly/{date}, and /api/chat.
+// API FUNCTIONS
 // ============================================================
 
 async function loadSummaryMetrics() {
@@ -393,7 +409,6 @@ async function renderDailyPeakChart() {
   const rows = await loadDailyPeakChart();
   const dates = rows.map((r) => r.date);
 
-  // Populate the date selector from the same call.
   const select = document.getElementById('dateSelect');
   select.innerHTML = '';
   dates.forEach((d) => {
@@ -417,7 +432,7 @@ async function renderDailyPeakChart() {
     },
     dataLabels: { enabled: false },
     xaxis: {
-      categories: dates.map((d) => d.slice(5)), // MM-DD
+      categories: dates.map((d) => d.slice(5)),
       labels: { style: { colors: '#94A3B8', fontSize: '10px' }, rotate: 0 },
       axisBorder: { color: '#334155' },
       axisTicks: { show: false },
@@ -437,7 +452,6 @@ async function renderHourlyCharts(dateStr) {
   const hours = await loadHourlyDispatch(dateStr);
   const categories = hours.map((h) => `${String(h.hour).padStart(2, '0')}:00`);
 
-  // ---- Chart 2A: Hourly Dispatch (dual-area) ----
   const dispatchSeries = [
     { name: 'Baseline Load', data: hours.map((h) => h.baseline_load_kw) },
     { name: 'Optimized Load', data: hours.map((h) => h.optimized_load_kw) },
@@ -474,7 +488,6 @@ async function renderHourlyCharts(dateStr) {
     hourlyDispatchChart.updateSeries(dispatchSeries);
   }
 
-  // ---- Chart 2B: Setpoint vs Indoor Temp (step vs smooth) ----
   const climateSeries = [
     { name: 'Setpoint', data: hours.map((h) => h.optimized_setpoint_c) },
     { name: 'Indoor Temp', data: hours.map((h) => h.optimized_indoor_temp_c) },
@@ -523,20 +536,41 @@ function appendUserBubble(text) {
   document.getElementById('chatMessages').appendChild(wrap);
 }
 
+function appendLoadingBubble() {
+  const wrap = document.createElement('div');
+  wrap.id = 'chatLoadingBubble';
+  wrap.className = 'flex justify-start';
+  wrap.innerHTML = `
+    <div class="bubble-ai rounded-md px-3.5 py-2.5 text-sm leading-relaxed text-txsecondary flex items-center gap-2">
+      <span class="status-dot animate-ping"></span>
+      <span>CoolLoad AI is thinking...</span>
+    </div>
+  `;
+  document.getElementById('chatMessages').appendChild(wrap);
+  scrollChatToBottom();
+}
+
+function removeLoadingBubble() {
+  const el = document.getElementById('chatLoadingBubble');
+  if (el) el.remove();
+}
+
 function appendAiBubble(answer, sources) {
   const wrap = document.createElement('div');
   wrap.className = 'flex justify-start flex-col items-start gap-1.5 max-w-[90%]';
 
+  const parsedAnswer = typeof marked !== 'undefined' ? marked.parse(answer) : escapeHtml(answer);
   const sourceItems = sources.map((s) => `<li class="font-mono text-txsecondary">${escapeHtml(s)}</li>`).join('');
 
   wrap.innerHTML = `
-    <div class="bubble-ai rounded-md px-3.5 py-2.5 text-sm leading-relaxed">${escapeHtml(answer)}</div>
+    <div class="bubble-ai rounded-md px-3.5 py-2.5 text-sm leading-relaxed">${parsedAnswer}</div>
+    ${sources && sources.length > 0 ? `
     <details class="text-xs">
       <summary class="text-txsecondary border border-border rounded-full px-2.5 py-1 inline-block hover:border-teal hover:text-txprimary transition-colors">
         Retrieved Context (${sources.length} docs)
       </summary>
       <ul class="mt-1.5 ml-1 space-y-0.5 text-xs">${sourceItems}</ul>
-    </details>
+    </details>` : ''}
   `;
   document.getElementById('chatMessages').appendChild(wrap);
 }
@@ -562,15 +596,17 @@ async function handleSend(queryStr) {
 
   const sendBtn = document.getElementById('chatSendBtn');
   sendBtn.disabled = true;
-  sendBtn.textContent = '...';
+
+  appendLoadingBubble();
 
   const result = await sendChatMessage(trimmed);
+
+  removeLoadingBubble();
 
   appendAiBubble(result.answer, result.sources || []);
   scrollChatToBottom();
 
   sendBtn.disabled = false;
-  sendBtn.textContent = 'Send';
 }
 
 // ============================================================
